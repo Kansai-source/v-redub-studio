@@ -22,9 +22,20 @@
 
 1. **Python** (Từ phiên bản `3.9` đến `3.11` được khuyến nghị).
 2. **Node.js** (Phiên bản `18.0` trở lên) & **npm**.
-3. **FFmpeg** (Bắt buộc phải được thêm vào cấu hình biến môi trường `PATH` của hệ thống).
-   * *Kiểm tra trên Terminal/PowerShell bằng lệnh:* `ffmpeg -version`
+3. **FFmpeg** (Bắt buộc phải cài đặt và đưa vào biến môi trường `PATH`).
 4. **Git** (để quản lý mã nguồn và tải về).
+
+> [!TIP]
+> **Cách cài đặt nhanh cho Windows (Qua PowerShell):**
+> Nhấp chuột phải vào nút Start -> chọn **PowerShell (Admin)** và chạy các lệnh sau để tự động tải và cài đặt Node.js và FFmpeg trong 5 giây:
+> ```powershell
+> # Cài đặt Node.js
+> winget install OpenJS.NodeJS
+>
+> # Cài đặt FFmpeg
+> winget install Gyan.FFmpeg
+> ```
+> *Sau khi cài đặt xong, hãy tắt và mở lại PowerShell rồi chạy thử `ffmpeg -version` để kiểm tra.*
 
 ---
 
