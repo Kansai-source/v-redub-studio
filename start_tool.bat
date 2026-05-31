@@ -9,11 +9,11 @@ echo.
 echo [1/3] Dang tim kiem moi truong Python & FFmpeg...
 
 :: Check venv python
-set PYTHON_PATH="C:\Users\Asus\Desktop\test ai\audiobook_builder\venv\Scripts\python.exe"
+set PYTHON_PATH="%~dp0backend\venv\Scripts\python.exe"
 if not exist %PYTHON_PATH% (
     echo [ERROR] Khong tim thay Python venv tai:
     echo %PYTHON_PATH%
-    echo Vui long kiem tra lai duong dan folder "test ai" cua ban.
+    echo Vui long chay qua file setup.bat de khoi tao va cai dat thu vien truoc!
     pause
     exit /b
 )
