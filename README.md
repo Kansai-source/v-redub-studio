@@ -28,16 +28,25 @@
 
 ---
 
-## 1. ⚙️ Hướng Dẫn Cài Đặt Chi Tiết
+## 🚀 1. Hướng Dẫn Dành Cho Máy Windows (Nhanh Nhất)
 
-Tải mã nguồn về máy tính hoặc clone từ GitHub:
-```bash
-git clone <URL_REPOS_CỦA_BẠN>
-cd "Tool download"
-```
+Nếu bạn chạy ứng dụng trên hệ điều hành **Windows**, bạn không cần gõ lệnh thủ công. Chỉ cần chạy các tệp bấm đúp sau:
+
+1. **Cài đặt lần đầu tiên:**
+   * Bấm đúp chuột trái vào tệp **`setup.bat`** ở thư mục gốc của dự án.
+   * Chương trình sẽ tự động tạo môi trường ảo Python (`venv`), cài đặt thư viện cần thiết cho Backend và chạy `npm install` cho Frontend React. bạn chỉ cần đợi cho đến khi hoàn thành.
+2. **Khởi chạy ứng dụng:**
+   * Sau khi hoàn tất cài đặt, hãy bấm đúp chuột trái vào tệp **`start.bat`** ở thư mục gốc.
+   * Lệnh này sẽ mở tự động 2 cửa sổ chạy đồng thời cả Server Backend (cổng 8000) và Client Frontend (cổng 5173). Trình duyệt của bạn sẽ tự động mở trang web giao diện phòng biên tập Studio.
+
+---
+
+## ⚙️ 2. Hướng Dẫn Cài Đặt và Khởi Chạy Thủ Công (Cho macOS / Linux)
+
+Nếu bạn chạy trên hệ điều hành **macOS** hoặc **Linux**, hãy thực hiện tuần tự các bước cấu hình thủ công sau:
 
 ### Bước A: Cấu hình Backend (Python Fast-API)
-1. Mở Cửa sổ Dòng lệnh (PowerShell hoặc Terminal) tại thư mục `backend/`:
+1. Mở Cửa sổ Dòng lệnh tại thư mục `backend/`:
    ```bash
    cd backend
    ```
@@ -46,14 +55,9 @@ cd "Tool download"
    python -m venv venv
    ```
 3. Kích hoạt môi trường ảo:
-   * **Trên Windows (PowerShell):**
-     ```powershell
-     .\venv\Scripts\activate
-     ```
-   * **Trên macOS / Linux:**
-     ```bash
-     source venv/bin/activate
-     ```
+   ```bash
+   source venv/bin/activate
+   ```
 4. Cài đặt các thư viện phụ thuộc:
    ```bash
    pip install -r requirements.txt
@@ -64,30 +68,15 @@ cd "Tool download"
    ```bash
    cd frontend
    ```
-2. Cài đặt các gói tài nguyên Node:
+2. Cài đặt các gói tài nguyên Node và chạy runtime:
    ```bash
    npm install
    ```
 
----
+### Bước C: Khởi chạy thủ công
+* **Chạy Server Backend:** Tại thư mục `backend`, chạy `python main.py`
+* **Chạy Client Frontend:** Tại thư mục `frontend`, chạy `npm run dev`
 
-## 2. 🚀 Hướng Dẫn Khởi Chạy Ứng Dụng
-
-### Khởi Động Server Backend Python:
-1. Đảm bảo bạn đang ở thư mục `backend` và đã kích hoạt môi trường ảo (`venv`).
-2. Chạy lệnh:
-   ```bash
-   python main.py
-   ```
-   *Mặc định backend sẽ chạy tại cổng local http://localhost:8000.*
-
-### Khởi Động Client Frontend React:
-1. Đảm bảo bạn đang ở thư mục `frontend`.
-2. Chạy lệnh:
-   ```bash
-   npm run dev
-   ```
-3. Trình duyệt sẽ khởi chạy hoặc bạn nhấp vào liên kết biểu thị (thường là http://localhost:5173) để truy cập giao diện V-reDub Studio.
 
 ---
 
