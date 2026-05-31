@@ -91,6 +91,24 @@ cd "Tool download"
 
 ---
 
+## 🍪 3. Hướng Dẫn Cấu Hình Cookies (Bắt Buộc cho Video Bị Chặn/Hạn Chế)
+
+Mặc định, hệ thống sẽ tự động quét thông tin Cookie từ các trình duyệt hiện tại (Chrome, Edge, Firefox) trên máy người dùng để tải video. Tuy nhiên, để đảm bảo việc tải xuống các video bị giới hạn tuổi, bị chặn địa lý hoặc chặn IP do bot diễn ra trơn tru nhất, bạn nên cung cấp file `cookies.txt` riêng biệt:
+
+### Các bước lấy và cài đặt `cookies.txt`:
+1. **Cài đặt tiện ích mở rộng (Extension) xuất Cookies trên Trình duyệt:**
+   * Cài đặt extension **Get cookies.txt LOCALLY** (dành cho Chrome/Edge/Opera) hoặc tiện ích tương đương từ Chôm Web Store.
+2. **Xuất file Cookies từ YouTube:**
+   * Truy cập trang [youtube.com](https://www.youtube.com/) trên trình duyệt của bạn (đảm bảo đang **đăng nhập** tài khoản Google để tránh dính mã CAPTCHA/Bot check).
+   * Bấm vào biểu tượng tiện ích **Get cookies.txt LOCALLY** đã cài ở góc phải thanh công cụ.
+   * Chọn **Export** hoặc **Download** để tải tệp tin dạng `youtube.com_cookies.txt` (hoặc đặt tên mặc định là `cookies.txt`).
+3. **Cấu hình vào thư mục dự án:**
+   * Đổi tên tệp tải về thành đúng **`cookies.txt`**.
+   * Sao chép tệp này và dán trực tiếp vào **Thư mục gốc** (thư mục `Tool download`) của dự án trên máy tính của bạn.
+   * Hệ thống download của backend sẽ tự động ưu tiên đọc file này trước tiên để vượt qua các lớp kiểm duyệt bảo mật của YouTube.
+
+---
+
 ## 🌐 Hướng Dẫn Đẩy Dự Án Lên GitHub & Chia Sẻ
 
 Để đưa mã nguồn này lưu trữ lên GitHub cá nhân của bạn để chia sẻ cho người khác, làm theo các bước sau:
