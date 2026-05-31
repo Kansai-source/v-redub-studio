@@ -1,0 +1,30 @@
+# Dependencies
+node_modules/
+dist/
+build/
+.yarn/
+*.log
+
+# Python Virtual Environment
+venv/
+.venv/
+__pycache__/
+*.pyc
+
+# Local Config & Secrets
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+cookies.txt
+
+# Media Directories (avoid uploading large video files)
+backend/temp/
+backend/downloads/
+backend/outputs/
+backend/voices/designed/
+
+# OS Files
+.DS_Store
+Thumbs.db
