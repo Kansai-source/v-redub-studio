@@ -87,14 +87,19 @@ Mặc định, hệ thống sẽ tự động quét thông tin Cookie từ các 
 ### Các bước lấy và cài đặt `cookies.txt`:
 1. **Cài đặt tiện ích mở rộng (Extension) xuất Cookies trên Trình duyệt:**
    * Cài đặt extension **Get cookies.txt LOCALLY** (dành cho Chrome/Edge/Opera) hoặc tiện ích tương đương từ Chôm Web Store.
-2. **Xuất file Cookies từ YouTube:**
-   * Truy cập trang [youtube.com](https://www.youtube.com/) trên trình duyệt của bạn (đảm bảo đang **đăng nhập** tài khoản Google để tránh dính mã CAPTCHA/Bot check).
+2. **Xuất file Cookies từ YouTube hoặc Bilibili:**
+   * Truy cập trang web nguồn (như [youtube.com](https://www.youtube.com/) hoặc [bilibili.com](https://www.bilibili.com/)) trên trình duyệt của bạn (đảm bảo đã **đăng nhập** tài khoản để có quyền tối đa).
    * Bấm vào biểu tượng tiện ích **Get cookies.txt LOCALLY** đã cài ở góc phải thanh công cụ.
-   * Chọn **Export** hoặc **Download** để tải tệp tin dạng `youtube.com_cookies.txt` (hoặc đặt tên mặc định là `cookies.txt`).
+   * Chọn **Export** hoặc **Download** để tải tệp tin dạng cookies.
 3. **Cấu hình vào thư mục dự án:**
    * Đổi tên tệp tải về thành đúng **`cookies.txt`**.
    * Sao chép tệp này và dán trực tiếp vào **Thư mục gốc** (thư mục `Tool download`) của dự án trên máy tính của bạn.
-   * Hệ thống download của backend sẽ tự động ưu tiên đọc file này trước tiên để vượt qua các lớp kiểm duyệt bảo mật của YouTube.
+   * Hệ thống download của backend sẽ tự động ưu tiên đọc file này trước tiên để vượt qua các lớp bảo mật và giới hạn chất lượng.
+
+> [!IMPORTANT]
+> **Giới hạn độ phân giải khi tải Video Bilibili / YouTube:**
+> * **Không có Cookies:** Bạn chỉ có thể tải video từ Bilibili ở chất lượng mặc định tối đa là **480p** (hoặc gặp lỗi chặn ở YouTube).
+> * **Có Cookies (đăng nhập sẵn tài khoản):** Sẽ tải được tối ưu chất lượng gốc cao nhất của video như **720p** và **1080p** cực mượt mà.
 
 ---
 
