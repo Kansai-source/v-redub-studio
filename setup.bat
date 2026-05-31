@@ -7,7 +7,29 @@ echo              CHUONG TRINH KHOI TAO V-REDUB STUDIO
 echo =======================================================
 echo.
 
-:: 1. Kiem tra va tu dong cai dat Node.js qua winget neu chua co
+:: 1. Kiem tra va tu dong cai dat Python qua winget neu chua co
+python --version >nul 2>&1
+if %errorlevel% neq 0 (
+    echo [!] Khong tim thay Python tren he thong.
+    echo [+] Dang tien hanh tu dong tai va cai dat Python 3.11 qua Windows winget...
+    winget install Python.Python.3.11 --accept-package-agreements --accept-source-agreements
+    if %errorlevel% equ 0 (
+        echo [+] Cai dat Python thanh cong!
+        echo [!] LUU Y: Vui long tat cua so CMD nay di va nhap dup chuot chay lai file setup.bat de bat dau buoc tiep theo.
+        pause
+        exit /b
+    ) else (
+        echo [ERROR] Khong the tu dong cai dat Python.
+        echo Vui long tai va cai dat thu cong tu trang chu: https://www.python.org/downloads/
+        echo LUU Y: Nho tich chon "Add python.exe to PATH" truoc khi bam Install.
+        pause
+        exit /b
+    )
+) else (
+    echo [~] Kiem tra Python: OK
+)
+
+:: 2. Kiem tra va tu dong cai dat Node.js qua winget neu chua co
 node -v >nul 2>&1
 if %errorlevel% neq 0 (
     echo [!] Khong tim thay Node.js tren he thong.
@@ -15,7 +37,7 @@ if %errorlevel% neq 0 (
     winget install OpenJS.NodeJS --accept-package-agreements --accept-source-agreements
     if %errorlevel% equ 0 (
         echo [+] Cai dat Node.js thanh cong!
-        echo [!] LUU Y: Vui long tat cua so CMD nay di va nhap dup chuot chay lai file setup.bat de nap bien moi truong.
+        echo [!] LUU Y: Vui long tat cua so CMD nay di va nhap dup chuot chay lai file setup.bat de bat dau buoc tiep theo.
         pause
         exit /b
     ) else (
@@ -25,11 +47,10 @@ if %errorlevel% neq 0 (
         exit /b
     )
 ) else (
-    echo [~] Kiem tra Node.js: OK (Version: )
-    node -v
+    echo [~] Kiem tra Node.js: OK
 )
 
-:: 2. Kiem tra va tu dong cai dat FFmpeg qua winget neu chua co
+:: 3. Kiem tra va tu dong cai dat FFmpeg qua winget neu chua co
 ffmpeg -version >nul 2>&1
 if %errorlevel% neq 0 (
     echo [!] Khong tim thay FFmpeg tren he thong.
@@ -54,16 +75,46 @@ echo.
 echo Buoc 1/2: Dang setup moi truong ao Backend Python...
 echo ----------------------------------------------------
 cd backend
+
+:: Xoa venv cu neu no bi loi hoac tro trung vao folder rac
+if exist venv (
+    if not exist venv\Scripts\python.exe (
+        echo [!] Phat hien thu muc venv loi (khong co python.exe). Tien hanh dọn dẹp va tao lai...
+        rd /s /q venv
+    )
+)
+
 if not exist venv (
     echo [+] Dang khoi tao moi truong ao (venv)...
     python -m venv venv
+    if %errorlevel% neq 0 (
+        echo [ERROR] Khong the khoi tao venv.
+        echo Vui long kiem tra xem Python cua ban co bi loi khong, hoac cai dat lai Python tu trang chu.
+        cd ..
+        pause
+        exit /b
+    )
 ) else (
     echo [~] Moi truong ao (venv) da ton tai. Quay lai tai nap...
 )
 
-echo [+] Dang kich hoat moi truong ao va tai cac thu vien python...
+echo [+] Kich hoat moi truong ao va tai cac thu vien python...
 call venv\Scripts\activate.bat
+if %errorlevel% neq 0 (
+    echo [ERROR] Kich hoat moi truong ao venv khong thanh cong.
+    cd ..
+    pause
+    exit /b
+)
+
+echo [+] Dang cai dat requirements (Co the mat 1-2 phut)...
 pip install -r requirements.txt
+if %errorlevel% neq 0 (
+    echo [ERROR] Cai dat cac thu vien Python that bai.
+    cd ..
+    pause
+    exit /b
+)
 cd ..
 
 echo.
@@ -72,6 +123,12 @@ echo -------------------------------------------------------
 cd frontend
 echo [+] Dang chay npm install (Vui long cho trong giay lat)...
 call npm install
+if %errorlevel% neq 0 (
+    echo [ERROR] Cai dat cac goi npm cho Frontend that bai.
+    cd ..
+    pause
+    exit /b
+)
 cd ..
 
 echo.
