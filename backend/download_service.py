@@ -62,7 +62,7 @@ def download_video(url: str) -> dict:
     last_error = None
     for cfg in configs_to_try:
         ydl_opts = {
-            'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best',
+            'format': 'bestvideo+bestaudio/best',
             'outtmpl': outtmpl,
             'merge_output_format': 'mp4',
             'progress_hooks': [download_progress_hook],
