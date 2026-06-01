@@ -66,6 +66,9 @@ def download_video(url: str) -> dict:
             'progress_hooks': [download_progress_hook],
             'quiet': True,
             'no_warnings': True,
+            'retries': 20,
+            'fragment_retries': 20,
+            'socket_timeout': 30,
             'http_headers': {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
