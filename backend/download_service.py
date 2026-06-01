@@ -69,8 +69,12 @@ def download_video(url: str) -> dict:
             }
         })
 
+    skip_to_fallback = False
     last_error = None
     for cfg in configs_to_try:
+        if skip_to_fallback and "fallback audio" not in cfg["name"].lower():
+            continue
+
         ydl_opts = {
             'format': 'bestvideo+bestaudio/best',
             'outtmpl': outtmpl,
@@ -116,7 +120,7 @@ def download_video(url: str) -> dict:
                         if f.startswith(file_id):
                             downloaded_path = os.path.join(DOWNLOADS_DIR, f)
                             break
-                            
+                             
                 title = info.get('title', 'Unknown Video')
                 duration = info.get('duration', 0)
                 thumbnail = info.get('thumbnail', '')
@@ -134,6 +138,15 @@ def download_video(url: str) -> dict:
         except Exception as e:
             print(f"[Download Service] Option {cfg['name']} failed: {e}")
             last_error = e
+            
+            # If we hit Bilibili's 403 / 524 bytes read CDN throttling, immediately skip trying
+            # other browser cookies (which will also fail and retry 20 times, wasting a lot of time)
+            # and jump directly to the fallback low-quality audio format.
+            err_str = str(e).lower()
+            if is_bilibili and ("524 bytes read" in err_str or "403" in err_str or "forbidden" in err_str):
+                print("[Download Service] Detected Bilibili CDN block. Skipping remaining high-quality attempts to save time and using low-quality fallback audio.")
+                skip_to_fallback = True
+
             # Cleanup any partially downloaded files for this uuid
             if os.path.exists(DOWNLOADS_DIR):
                 for f in os.listdir(DOWNLOADS_DIR):
