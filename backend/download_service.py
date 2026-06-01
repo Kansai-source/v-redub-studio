@@ -57,6 +57,8 @@ def download_video(url: str) -> dict:
         "opts": {}
     })
 
+    is_bilibili = "bilibili" in url.lower() or "b23.tv" in url.lower()
+
     last_error = None
     for cfg in configs_to_try:
         ydl_opts = {
@@ -75,6 +77,14 @@ def download_video(url: str) -> dict:
                 'Accept-Language': 'en-US,en;q=0.9,vi;q=0.8',
             }
         }
+
+        if is_bilibili:
+            ydl_opts.update({
+                'external_downloader': 'ffmpeg',
+                'external_downloader_args': {
+                    'ffmpeg_i': ['-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '5']
+                }
+            })
         
         # Merge configuration specific parameters
         ydl_opts.update(cfg["opts"])
