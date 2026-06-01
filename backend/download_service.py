@@ -26,7 +26,7 @@ def download_video(url: str) -> dict:
     ]
     detected_cookie = None
     for cp in cookie_paths:
-        if os.path.exists(cp):
+        if os.path.exists(cp) and os.path.getsize(cp) > 0:
             detected_cookie = cp
             break
 
@@ -75,27 +75,9 @@ def download_video(url: str) -> dict:
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
                 'Accept-Language': 'en-US,en;q=0.9,vi;q=0.8',
+                'Referer': 'https://www.bilibili.com/'
             }
         }
-
-        if is_bilibili:
-            # Bilibili CDNs require exact User-Agent and Referer headers to avoid throttling or aborting connection
-            headers_str = (
-                "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36\r\n"
-                "Referer: https://www.bilibili.com/\r\n"
-                "Accept: */*\r\n"
-            )
-            ydl_opts.update({
-                'external_downloader': 'ffmpeg',
-                'external_downloader_args': {
-                    'ffmpeg_i': [
-                        '-reconnect', '1',
-                        '-reconnect_streamed', '1',
-                        '-reconnect_delay_max', '5',
-                        '-headers', headers_str
-                    ]
-                }
-            })
         
         # Merge configuration specific parameters
         ydl_opts.update(cfg["opts"])
