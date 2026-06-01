@@ -62,11 +62,15 @@ def download_video(url: str) -> dict:
     if is_bilibili:
         # Ultimate fallback for Bilibili: download with low-quality audio codec 30216
         # which Bilibili CDNs allow download without cookie session constraints.
+        fallback_opts = {
+            "format": "bestvideo+30216/best"
+        }
+        if detected_cookie:
+            fallback_opts['cookiefile'] = detected_cookie
+            
         configs_to_try.append({
             "name": "Bilibili fallback audio codec",
-            "opts": {
-                "format": "bestvideo+30216/best"
-            }
+            "opts": fallback_opts
         })
 
     skip_to_fallback = False
