@@ -106,49 +106,20 @@ def process_video_effects(
         
     if hflip:
         vf_list.append("hflip")
-        
-    if cover_sub:
-        cover_auto_fit = options.get("cover_auto_fit", True)
-        # Normalize color names for FFmpeg
-        raw_color = cover_color.lower().strip()
-        ffmpeg_color = "yellow" if raw_color == "gold" else raw_color
-        
-        if cover_auto_fit and segments:
-            # Generate a drawbox filter for each segment
-            for seg in segments:
-                start = float(seg.get("start", 0.0))
-                end = float(seg.get("end", 0.0))
-                if end <= start:
-                    continue
-                text = seg.get("text", "")
-                # Clean prompt formatting or tags if any
-                char_count = len(text)
-                # Heuristic: 2.2% width per character, min 15% (0.15), max is user-specified cover_w_pct
-                char_w_pct = char_count * 0.022
-                estimated_w_pct = min(cover_w_pct, max(0.15, char_w_pct))
-                
-                # Align using user's centering offset
-                center_offset = (cover_x_pct + cover_w_pct / 2.0) - 0.5
-                estimated_x_pct = 0.5 + center_offset - (estimated_w_pct / 2.0)
-                estimated_x_pct = max(0.0, min(1.0 - estimated_w_pct, estimated_x_pct))
-                
-                drawbox_filter = f"drawbox=x=iw*{estimated_x_pct:.4f}:y=ih*{cover_y_pct:.4f}:w=iw*{estimated_w_pct:.4f}:h={cover_h_px}:color={ffmpeg_color}:t=fill:enable='between(t,{start:.3f},{end:.3f})'"
-                vf_list.append(drawbox_filter)
-            print(f"[FFmpeg] Dynamic Auto-Fit Cover Sub applied to {len(segments)} segments with color '{ffmpeg_color}'.")
-        else:
-            # Fallback to single fixed drawbox
-            drawbox_filter = f"drawbox=x=iw*{cover_x_pct}:y=ih*{cover_y_pct}:w=iw*{cover_w_pct}:h={cover_h_px}:color={ffmpeg_color}:t=fill"
-            if segments:
-                drawbox_conds = []
-                for seg in segments:
-                    start = float(seg.get("start", 0.0))
-                    end = float(seg.get("end", 0.0))
-                    if end > start:
-                        drawbox_conds.append(f"between(t,{start:.3f},{end:.3f})")
-                if drawbox_conds:
-                    drawbox_filter += f":enable='{'+'.join(drawbox_conds)}'"
-            vf_list.append(drawbox_filter)
-            print(f"[FFmpeg] Static Cover Sub is active during dialogue segments with color '{ffmpeg_color}'.")
+
+    # Anti-copyright: Micro-rotation
+    rotate_angle = float(options.get("rotate_angle", 0.0))
+    if rotate_angle != 0.0:
+        # Rotate by angle and zoom/crop slightly to hide black corners
+        # PI = 3.141592653589793
+        vf_list.append(f"rotate={rotate_angle}*PI/180:ow=rotw({rotate_angle}*PI/180):oh=roth({rotate_angle}*PI/180)")
+        vf_list.append("crop=iw*0.96:ih*0.96")
+
+    # Anti-copyright: Dynamic Panning (Handheld Camera effect)
+    enable_dynamic_pan = bool(options.get("enable_dynamic_pan", False))
+    if enable_dynamic_pan:
+        # Crop 90% and continuously pan the offset using sinusoidal function of time
+        vf_list.append("crop=iw*0.92:ih*0.92:(in_w-out_w)/2+(in_w-out_w)/2*sin(t*1.2):(in_h-out_h)/2+(in_h-out_h)/2*cos(t*0.9)")
         
     # 2b. Reframe aspect ratio (16:9 -> 9:16)
     if aspect_ratio_mode == "crop_9_16":
@@ -179,6 +150,24 @@ def process_video_effects(
             f"[bg_blurred][fg]overlay=(W-w)/2:(H-h)/2"
         )
         vf_list.append(blur_filter)
+    elif aspect_ratio_mode == "black_9_16":
+        fg_crop = ""
+        if zoom > 0:
+            fg_factor = 1.0 - (zoom / 100.0)
+            if zoom_align == "bottom":
+                fg_crop = f"crop=iw*{fg_factor}:ih*{fg_factor}:(iw-ow)/2:ih-oh,"
+            elif zoom_align == "top":
+                fg_crop = f"crop=iw*{fg_factor}:ih*{fg_factor}:(iw-ow)/2:0,"
+            else:
+                fg_crop = f"crop=iw*{fg_factor}:ih*{fg_factor},"
+            
+        black_filter = (
+            f"split[orig][bg_dummy];"
+            f"color=c=black:s=720x1280[bg];"
+            f"[orig]{fg_crop}scale=720:-1[fg];"
+            f"[bg][fg]overlay=(W-w)/2:(H-h)/2"
+        )
+        vf_list.append(black_filter)
     else:
         # Original 16:9
         if zoom > 0:
@@ -190,14 +179,56 @@ def process_video_effects(
             else:
                 vf_list.append(f"crop=iw*{crop_factor}:ih*{crop_factor},scale=iw:ih")
 
-    # 2c. Burn-in subtitles
+    # 2c. Subtitle Cover-up (drawbox) applied on final layout
+    if cover_sub:
+        cover_auto_fit = options.get("cover_auto_fit", True)
+        # Normalize color names for FFmpeg
+        raw_color = cover_color.lower().strip()
+        ffmpeg_color = "yellow" if raw_color == "gold" else raw_color
+        
+        if cover_auto_fit and segments:
+            # Generate a drawbox filter for each segment
+            for seg in segments:
+                start = float(seg.get("start", 0.0))
+                end = float(seg.get("end", 0.0))
+                if end <= start:
+                    continue
+                text = seg.get("text", "")
+                char_count = len(text)
+                char_w_pct = char_count * 0.022
+                estimated_w_pct = min(cover_w_pct, max(0.15, char_w_pct))
+                
+                center_offset = (cover_x_pct + cover_w_pct / 2.0) - 0.5
+                estimated_x_pct = 0.5 + center_offset - (estimated_w_pct / 2.0)
+                estimated_x_pct = max(0.0, min(1.0 - estimated_w_pct, estimated_x_pct))
+                
+                drawbox_filter = f"drawbox=x=iw*{estimated_x_pct:.4f}:y=ih*{cover_y_pct:.4f}:w=iw*{estimated_w_pct:.4f}:h={cover_h_px}:color={ffmpeg_color}:t=fill:enable='between(t,{start:.3f},{end:.3f})'"
+                vf_list.append(drawbox_filter)
+            print(f"[FFmpeg] Dynamic Auto-Fit Cover Sub applied to {len(segments)} segments with color '{ffmpeg_color}'.")
+        else:
+            # Fallback to single fixed drawbox
+            drawbox_filter = f"drawbox=x=iw*{cover_x_pct}:y=ih*{cover_y_pct}:w=iw*{cover_w_pct}:h={cover_h_px}:color={ffmpeg_color}:t=fill"
+            if segments:
+                drawbox_conds = []
+                for seg in segments:
+                    start = float(seg.get("start", 0.0))
+                    end = float(seg.get("end", 0.0))
+                    if end > start:
+                        drawbox_conds.append(f"between(t,{start:.3f},{end:.3f})")
+                if drawbox_conds:
+                    drawbox_filter += f":enable='{'+'.join(drawbox_conds)}'"
+            vf_list.append(drawbox_filter)
+            print(f"[FFmpeg] Static Cover Sub is active during dialogue segments with color '{ffmpeg_color}'.")
+
+    # 2d. Burn-in subtitles
     escaped_srt = None
     if srt_path and os.path.exists(srt_path):
         import shutil
         temp_srt_name = f"sub_{os.path.basename(input_video_path)}.srt"
         shutil.copy2(srt_path, os.path.join(TEMP_DIR, temp_srt_name))
         escaped_srt = f"./{temp_srt_name}"
-        vf_list.append(f"subtitles={escaped_srt}:force_style='FontSize=16,Alignment=2,PrimaryColour=&H00FFFF'")
+        subtitle_margin_v = int(options.get("subtitle_margin_v", 20))
+        vf_list.append(f"subtitles={escaped_srt}:force_style='FontSize=16,Alignment=2,PrimaryColour=&H00FFFF,MarginV={subtitle_margin_v}'")
         
     # 2d. Apply speed (should be done after burn-in subtitles so timeline matches, and at the end of vf chain)
     if speed != 1.0:

@@ -79,13 +79,13 @@ cd backend
 :: Xoa venv cu neu no bi loi hoac tro trung vao folder rac
 if exist venv (
     if not exist venv\Scripts\python.exe (
-        echo [!] Phat hien thu muc venv loi (khong co python.exe). Tien hanh dọn dẹp va tao lai...
+        echo [!] Phat hien thu muc venv loi - khong co python.exe. Tien hanh don dep va tao lai...
         rd /s /q venv
     )
 )
 
 if not exist venv (
-    echo [+] Dang khoi tao moi truong ao (venv)...
+    echo [+] Dang khoi tao moi truong ao venv...
     python -m venv venv
     if %errorlevel% neq 0 (
         echo [ERROR] Khong the khoi tao venv.
@@ -95,7 +95,7 @@ if not exist venv (
         exit /b
     )
 ) else (
-    echo [~] Moi truong ao (venv) da ton tai. Quay lai tai nap...
+    echo [~] Moi truong ao venv da ton tai. Quay lai tai nap...
 )
 
 echo [+] Kich hoat moi truong ao va tai cac thu vien python...

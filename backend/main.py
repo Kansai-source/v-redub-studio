@@ -62,6 +62,9 @@ class VideoFilterOptions(BaseModel):
     ducking_volume: float = 0.15
     cover_auto_fit: bool = True
     enable_dubbing: bool = True
+    subtitle_margin_v: int = 20
+    rotate_angle: float = 0.0
+    enable_dynamic_pan: bool = False
 
 class DubAndEditRequest(BaseModel):
     video_path: str

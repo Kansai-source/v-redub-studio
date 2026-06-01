@@ -18,24 +18,16 @@
 
 ## 🛠️ Yêu Cầu Cài Đặt Hệ Thống
 
-Để chạy được V-reDub Studio, máy tính của bạn cần được cài đặt sẵn:
+Để chạy được V-reDub Studio, máy tính của bạn cần được cài đặt các phần mềm nền tảng. Tuy nhiên, nếu bạn dùng hệ điều hành Windows, **tệp tin `setup.bat` sẽ tự động phát hiện và cài đặt toàn bộ giúp bạn!**
 
-1. **Python** (Từ phiên bản `3.9` đến `3.11` được khuyến nghị).
+Các phần mềm nền tảng bao gồm:
+1. **Python** (Yêu cầu phiên bản từ `3.9` đến `3.11`).
 2. **Node.js** (Phiên bản `18.0` trở lên) & **npm**.
-3. **FFmpeg** (Bắt buộc phải cài đặt và đưa vào biến môi trường `PATH`).
-4. **Git** (để quản lý mã nguồn và tải về).
+3. **FFmpeg** (Công cụ xử lý Video/Audio cốt lõi).
 
 > [!TIP]
-> **Cách cài đặt nhanh cho Windows (Qua PowerShell):**
-> Nhấp chuột phải vào nút Start -> chọn **PowerShell (Admin)** và chạy các lệnh sau để tự động tải và cài đặt Node.js và FFmpeg trong 5 giây:
-> ```powershell
-> # Cài đặt Node.js
-> winget install OpenJS.NodeJS
->
-> # Cài đặt FFmpeg
-> winget install Gyan.FFmpeg
-> ```
-> *Sau khi cài đặt xong, hãy tắt và mở lại PowerShell rồi chạy thử `ffmpeg -version` để kiểm tra.*
+> **Khuyên dùng trên Windows:**
+> Bạn chỉ cần mở thư mục dự án và nhấp đúp chạy tệp **`setup.bat`**. Tệp này sẽ kiểm tra xem máy bạn đã có Python, Node.js, hay FFmpeg chưa, và tự động gọi trình quản lý gói `winget` của Microsoft để cài đặt tự động toàn bộ những gì còn thiếu!
 
 ---
 

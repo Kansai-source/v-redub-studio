@@ -89,6 +89,8 @@ export default function App() {
   const [contrast, setContrast] = useState<number>(1.0);
   const [saturation, setSaturation] = useState<number>(1.0);
   const [hflip, setHflip] = useState<boolean>(true);
+  const [rotateAngle, setRotateAngle] = useState<number>(0.0); // angle in degrees -2 to 2
+  const [enableDynamicPan, setEnableDynamicPan] = useState<boolean>(false); // camera shake/pan effect
   
   const [coverSub, setCoverSub] = useState<boolean>(true);
   const [coverColor, setCoverColor] = useState<string>("gold");
@@ -108,6 +110,7 @@ export default function App() {
   // Custom Speed & Aspect Ratio
   const [videoSpeed, setVideoSpeed] = useState<number>(1.0);
   const [aspectRatioMode, setAspectRatioMode] = useState<string>("original"); // original, crop_9_16, blur_9_16
+  const [subMarginV, setSubMarginV] = useState<number>(20); // vertical margin for burned subtitles
   
   // Voice Upload States
   const [uploadVoiceName, setUploadVoiceName] = useState<string>("");
@@ -553,7 +556,10 @@ export default function App() {
         enable_ducking: enableDucking,
         ducking_volume: duckingVolume,
         cover_auto_fit: coverAutoFit,
-        enable_dubbing: enableDubbing
+        enable_dubbing: enableDubbing,
+        subtitle_margin_v: subMarginV,
+        rotate_angle: rotateAngle,
+        enable_dynamic_pan: enableDynamicPan
       }
     };
     
@@ -862,7 +868,38 @@ export default function App() {
                 <option value="original">Giữ nguyên gốc (16:9)</option>
                 <option value="crop_9_16">Cắt giữa 9:16 (Center Crop)</option>
                 <option value="blur_9_16">Lồng nền mờ 9:16 (Blur Background)</option>
+                <option value="black_9_16">Nền đen 9:16 (Fit Black Bars)</option>
               </select>
+            </div>
+
+            {/* Anti-Copyright Rotation & Panning */}
+            <div style={{ borderTop: "1px dashed rgba(255,255,255,0.08)", marginTop: "12px", paddingTop: "12px", display: "flex", flexDirection: "column", gap: "10px" }}>
+              <div className="slider-group">
+                <div className="slider-label-row">
+                  <span style={{ fontSize: "11px", color: "var(--text-muted)", fontWeight: "600" }}>XOAY GÓC SIÊU NHỎ:</span>
+                  <span className="slider-value" style={{ fontSize: "12px" }}>{rotateAngle}°</span>
+                </div>
+                <input 
+                  type="range" 
+                  min="-2.0" 
+                  max="2.0" 
+                  step="0.1" 
+                  value={rotateAngle} 
+                  onChange={(e) => setRotateAngle(parseFloat(e.target.value))}
+                />
+              </div>
+
+              <div className="toggle-row">
+                <span style={{ fontSize: "13px" }}>Lắc camera chuyển động (Dynamic Pan):</span>
+                <label className="switch">
+                  <input 
+                    type="checkbox" 
+                    checked={enableDynamicPan} 
+                    onChange={(e) => setEnableDynamicPan(e.target.checked)}
+                  />
+                  <span className="slider-switch"></span>
+                </label>
+              </div>
             </div>
           </div>
 
@@ -1013,6 +1050,21 @@ export default function App() {
                 step="0.05" 
                 value={ttsVol} 
                 onChange={(e) => setTtsVol(parseFloat(e.target.value))}
+              />
+            </div>
+
+            <div className="slider-group">
+              <div className="slider-label-row">
+                <span>Vị trí chữ phụ đề (Y-Margin):</span>
+                <span className="slider-value">{subMarginV} px</span>
+              </div>
+              <input 
+                type="range" 
+                min="10" 
+                max="300" 
+                step="5" 
+                value={subMarginV} 
+                onChange={(e) => setSubMarginV(parseInt(e.target.value))}
               />
             </div>
 

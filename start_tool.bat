@@ -6,7 +6,7 @@ echo ===================================================
 echo.
 
 :: Detect if ffmpeg and python venv are available
-echo [1/3] Dang tim kiem moi truong Python & FFmpeg...
+echo [1/3] Dang tim kiem moi truong Python va FFmpeg...
 
 :: Check venv python
 set PYTHON_PATH="%~dp0backend\venv\Scripts\python.exe"
