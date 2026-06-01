@@ -71,6 +71,8 @@ def download_video(url: str) -> dict:
             'retries': 20,
             'fragment_retries': 20,
             'socket_timeout': 30,
+            'nokeepalive': True,
+            'http_chunk_size': 1048576 * 5,  # Download in 5MB chunks to prevent CDN connection drops
             'http_headers': {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
