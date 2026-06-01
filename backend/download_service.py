@@ -59,6 +59,16 @@ def download_video(url: str) -> dict:
 
     is_bilibili = "bilibili" in url.lower() or "b23.tv" in url.lower()
 
+    if is_bilibili:
+        # Ultimate fallback for Bilibili: download with low-quality audio codec 30216
+        # which Bilibili CDNs allow download without cookie session constraints.
+        configs_to_try.append({
+            "name": "Bilibili fallback audio codec",
+            "opts": {
+                "format": "bestvideo+30216/best"
+            }
+        })
+
     last_error = None
     for cfg in configs_to_try:
         ydl_opts = {
@@ -80,6 +90,14 @@ def download_video(url: str) -> dict:
                 'Referer': 'https://www.bilibili.com/'
             }
         }
+
+        if is_bilibili:
+            # Disable MCDN P2P mirror nodes to force stable premium global CDN (e.g. Akamai)
+            ydl_opts['extractor_args'] = {
+                'bilibili': {
+                    'mcdn': ['0']
+                }
+            }
         
         # Merge configuration specific parameters
         ydl_opts.update(cfg["opts"])
