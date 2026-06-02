@@ -9,4 +9,6 @@ numpy
 soundfile
 torch
 omnivoice
+google-generativeai
+
 

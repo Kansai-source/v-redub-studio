@@ -187,6 +187,7 @@ def process_video_effects(
         ffmpeg_color = "yellow" if raw_color == "gold" else raw_color
         
         if cover_auto_fit and segments:
+            import math
             # Generate a drawbox filter for each segment
             for seg in segments:
                 start = float(seg.get("start", 0.0))
@@ -202,7 +203,19 @@ def process_video_effects(
                 estimated_x_pct = 0.5 + center_offset - (estimated_w_pct / 2.0)
                 estimated_x_pct = max(0.0, min(1.0 - estimated_w_pct, estimated_x_pct))
                 
-                drawbox_filter = f"drawbox=x=iw*{estimated_x_pct:.4f}:y=ih*{cover_y_pct:.4f}:w=iw*{estimated_w_pct:.4f}:h={cover_h_px}:color={ffmpeg_color}:t=fill:enable='between(t,{start:.3f},{end:.3f})'"
+                # Estimate number of lines text wraps into:
+                estimated_lines = 1
+                if estimated_w_pct > 0:
+                    estimated_lines = max(1, math.ceil(char_w_pct / estimated_w_pct))
+                
+                # Dynamic height adjustments
+                extra_h = (estimated_lines - 1) * 30
+                estimated_h = cover_h_px + extra_h
+                
+                # Shift y coordinate upwards to cover extra lines (grow upwards)
+                drawbox_y_expr = f"ih*{cover_y_pct:.4f}-{extra_h}"
+                
+                drawbox_filter = f"drawbox=x=iw*{estimated_x_pct:.4f}:y=max(0,{drawbox_y_expr}):w=iw*{estimated_w_pct:.4f}:h={estimated_h}:color={ffmpeg_color}:t=fill:enable='between(t,{start:.3f},{end:.3f})'"
                 vf_list.append(drawbox_filter)
             print(f"[FFmpeg] Dynamic Auto-Fit Cover Sub applied to {len(segments)} segments with color '{ffmpeg_color}'.")
         else:
