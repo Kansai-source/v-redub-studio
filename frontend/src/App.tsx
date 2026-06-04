@@ -717,6 +717,37 @@ export default function App() {
       setIsTranscribing(false);
     }
   };
+  
+  // Custom API Endpoint Model Scanner
+  const handleScanModels = async () => {
+    if (!geminiKey) {
+      addLog("Lỗi quét mô hình: Chưa cung cấp Gemini API Key!", "error");
+      return;
+    }
+    
+    addLog(`Đang thực hiện quét danh sách mô hình từ kết nối: ${geminiAPIEndpoint || "Mặc định (Google)"}...`, "info");
+    
+    try {
+      const urlParams = new URLSearchParams({
+        gemini_key: geminiKey
+      });
+      if (geminiAPIEndpoint) {
+        urlParams.append("gemini_api_endpoint", geminiAPIEndpoint);
+      }
+      
+      const res = await fetch(`${BACKEND_URL}/api/models?${urlParams.toString()}`);
+      const data = await res.json();
+      
+      if (data.success && data.models) {
+        addLog(`Quét thành công! Tìm thấy ${data.models.length} mô hình được hỗ trợ bởi Endpoint này.`, "success");
+        addLog(`Danh sách mô hình khả dụng:\n- ${data.models.join("\n- ")}`, "success");
+      } else {
+        addLog(`Quét mô hình thất bại: ${data.error || "Lỗi không xác định"}`, "error");
+      }
+    } catch (e: any) {
+      addLog(`Lỗi xử lý quét mô hình: ${e.message}`, "error");
+    }
+  };
 
   // 3. Phối trộn Edit & Dub Video
   const handleDubAndEdit = async () => {
@@ -1595,13 +1626,23 @@ export default function App() {
                       
                       <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
                         <span style={{ fontSize: "11px", color: "var(--text-muted)", fontWeight: "600" }}>URL ENDPOINT KHÁC (TÙY CHỌN proxy/gateway):</span>
-                        <input 
-                          type="text" 
-                          placeholder="https://generativelanguage.googleapis.com" 
-                          value={geminiAPIEndpoint} 
-                          onChange={(e) => setGeminiAPIEndpoint(e.target.value)}
-                          style={{ padding: "6px 10px", fontSize: "13px" }}
-                        />
+                        <div style={{ display: "flex", gap: "8px" }}>
+                          <input 
+                            type="text" 
+                            placeholder="https://generativelanguage.googleapis.com" 
+                            value={geminiAPIEndpoint} 
+                            onChange={(e) => setGeminiAPIEndpoint(e.target.value)}
+                            style={{ flex: 1, padding: "6px 10px", fontSize: "13px" }}
+                          />
+                          <button
+                            type="button"
+                            onClick={handleScanModels}
+                            className="btn-accent"
+                            style={{ padding: "6px 12.0px", fontSize: "12.0px", whiteSpace: "nowrap", height: "auto" }}
+                          >
+                            🔍 Quét Models
+                          </button>
+                        </div>
                       </div>
                     </>
                   )}

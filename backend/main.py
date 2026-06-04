@@ -597,5 +597,26 @@ def serve_video_preview(filename: str, range: Optional[str] = None):
         
     return FileResponse(file_path, media_type="video/mp4")
 
+@app.get("/api/models")
+def api_models(gemini_key: str, gemini_api_endpoint: Optional[str] = None):
+    """Lists available Gemini models from the configured endpoint."""
+    if not gemini_key:
+        return {"success": False, "error": "Gemini API key is required"}
+    try:
+        import google.generativeai as genai
+        client_options = {}
+        if gemini_api_endpoint:
+            client_options['api_endpoint'] = gemini_api_endpoint
+            
+        genai.configure(api_key=gemini_key, client_options=client_options if client_options else None)
+        models = []
+        for m in genai.list_models():
+            # Get clean name (strip models/)
+            clean_name = m.name.replace("models/", "")
+            models.append(clean_name)
+        return {"success": True, "models": models}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=PORT, reload=True)
