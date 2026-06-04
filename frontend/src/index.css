@@ -370,6 +370,7 @@ input:checked + .slider-switch:before {
 }
 
 .subtitles-workspace {
+  position: relative;
   flex: 1;
   overflow-y: auto;
   display: flex;
