@@ -1,4 +1,5 @@
 import os
+from typing import Optional
 import json
 import subprocess
 import urllib.parse
@@ -119,7 +120,8 @@ def transcribe_with_gemini(
     audio_path: str,
     gemini_key: str,
     gemini_model: str = "gemini-3.5-flash",
-    gemini_chunk_size: float = 300.0
+    gemini_chunk_size: float = 900.0,
+    gemini_api_endpoint: Optional[str] = None
 ) -> dict:
     """Uses Google Gemini API to split audio context, transcribe, translate, and assign speaker values."""
     if not gemini_key:
@@ -129,7 +131,11 @@ def transcribe_with_gemini(
     import google.generativeai as genai
     import time
     
-    genai.configure(api_key=gemini_key)
+    client_options = {}
+    if gemini_api_endpoint:
+        client_options['api_endpoint'] = gemini_api_endpoint
+        
+    genai.configure(api_key=gemini_key, client_options=client_options if client_options else None)
     
     # 1. Split audio track into smaller segments
     chunks = split_audio_into_chunks(audio_path, chunk_length_sec=gemini_chunk_size)
@@ -253,11 +259,12 @@ def transcribe_and_translate(
     mode: str = "local",
     gemini_key: str = None,
     gemini_model: str = "gemini-3.5-flash",
-    gemini_chunk_size: float = 300.0
+    gemini_chunk_size: float = 900.0,
+    gemini_api_endpoint: Optional[str] = None
 ) -> dict:
     """Coordinates transcription and translation depending on chosen mode: Local or Gemini API."""
     if mode == "gemini":
-        return transcribe_with_gemini(audio_path, gemini_key, gemini_model, gemini_chunk_size)
+        return transcribe_with_gemini(audio_path, gemini_key, gemini_model, gemini_chunk_size, gemini_api_endpoint)
         
     # Local mode (default faster-whisper + Google Translate API)
     model = get_whisper_model()
