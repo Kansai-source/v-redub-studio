@@ -141,10 +141,10 @@ def transcribe_with_gemini(
     else:
         genai.configure(api_key=gemini_key)
     
-    # For custom proxy endpoints, cap the chunk size to 600 seconds (10 minutes) to prevent "413 Payload Too Large" error
+    # For custom proxy endpoints, cap the chunk size to 300 seconds (5 minutes) to prevent "413 Payload Too Large" and "524 Timeout" errors
     effective_chunk_size = gemini_chunk_size
     if gemini_api_endpoint:
-        effective_chunk_size = min(gemini_chunk_size, 600.0)
+        effective_chunk_size = min(gemini_chunk_size, 300.0)
         print(f"[AI Service] Custom endpoint active, using effective chunk size: {effective_chunk_size}s")
 
     # 1. Split audio track into smaller segments
