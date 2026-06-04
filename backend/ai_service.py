@@ -133,7 +133,8 @@ def transcribe_with_gemini(
     
     client_options = {}
     if gemini_api_endpoint:
-        client_options['api_endpoint'] = gemini_api_endpoint
+        clean_endpoint = gemini_api_endpoint.replace("https://", "").replace("http://", "").rstrip("/")
+        client_options['api_endpoint'] = clean_endpoint
         
     genai.configure(api_key=gemini_key, client_options=client_options if client_options else None)
     

@@ -606,11 +606,12 @@ def api_models(gemini_key: str, gemini_api_endpoint: Optional[str] = None):
         import google.generativeai as genai
         client_options = {}
         if gemini_api_endpoint:
-            client_options['api_endpoint'] = gemini_api_endpoint
+            clean_endpoint = gemini_api_endpoint.replace("https://", "").replace("http://", "").rstrip("/")
+            client_options['api_endpoint'] = clean_endpoint
             
         genai.configure(api_key=gemini_key, client_options=client_options if client_options else None)
         models = []
-        for m in genai.list_models():
+        for m in genai.list_models(request_options={"timeout": 10.0}):
             # Get clean name (strip models/)
             clean_name = m.name.replace("models/", "")
             models.append(clean_name)
