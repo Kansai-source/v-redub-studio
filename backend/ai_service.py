@@ -58,8 +58,9 @@ def guess_gender(vietnamese_text: str) -> str:
     return "female" # Default
 
 def split_audio_into_chunks(audio_path: str, chunk_length_sec: float = 900.0) -> list:
-    """Splits audio track into smaller chunks using FFmpeg copy block command to bypass size limitations."""
-    # Obtain audio duration through ffprobe
+    """Splits audio track into smaller chunks using FFmpeg.
+    Uses target libmp3lame compression to reduce audio file upload sizes down to 5%.
+    """
     duration = 0.0
     try:
         cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", audio_path]
@@ -69,23 +70,40 @@ def split_audio_into_chunks(audio_path: str, chunk_length_sec: float = 900.0) ->
         print(f"[AI Service] ffprobe failed to get duration: {e}")
         return [(audio_path, 0.0)]
         
+    filename_no_ext, _ = os.path.splitext(audio_path)
+    
+    # If audio is small, still compress it to save upload time
     if duration <= chunk_length_sec:
+        compressed_path = f"{filename_no_ext}_compressed.mp3"
+        print(f"[AI Service] Compressing short audio to MP3: {compressed_path}")
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", audio_path,
+            "-acodec", "libmp3lame",
+            "-b:a", "64k",
+            "-ac", "1",
+            compressed_path
+        ]
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if os.path.exists(compressed_path):
+            return [(compressed_path, 0.0)]
         return [(audio_path, 0.0)]
         
-    print(f"[AI Service] Audio is {duration}s. Splitting into chunks of {chunk_length_sec}s for Gemini API processing...")
+    print(f"[AI Service] Audio is {duration}s. Splitting & compressing into chunks of {chunk_length_sec}s for Gemini API...")
     chunks = []
-    filename_no_ext, ext = os.path.splitext(audio_path)
     
     start_time = 0.0
     index = 0
     while start_time < duration:
-        chunk_file = f"{filename_no_ext}_chunk_{index}{ext}"
+        chunk_file = f"{filename_no_ext}_chunk_{index}.mp3"
         cmd = [
             "ffmpeg", "-y",
             "-ss", str(start_time),
             "-t", str(chunk_length_sec),
             "-i", audio_path,
-            "-acodec", "copy",
+            "-acodec", "libmp3lame",
+            "-b:a", "64k",
+            "-ac", "1",
             chunk_file
         ]
         subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -114,34 +132,46 @@ def transcribe_with_gemini(
     
     # 1. Split audio track into smaller 15-minute segments
     chunks = split_audio_into_chunks(audio_path, chunk_length_sec=900.0)
-    
     global_segments = []
     seg_counter = 0
+    global_speaker_profiles = {}  # maps speaker_id -> short vocal description & role
     
-    # Prompt instruct prompt
-    prompt = """
+    for chunk_file, time_offset in chunks:
+        print(f"[AI Service] Processing chunk: {os.path.basename(chunk_file)} (Start offset: {time_offset} seconds)")
+        
+        # Build profiles context for prompt instruction continuity
+        profiles_context = ""
+        if global_speaker_profiles:
+            profiles_context = "\nHere are the speakers already identified in previous segments. Match the voices in this new segment to these profiles if they are the same voice:\n"
+            for spk_id, desc in global_speaker_profiles.items():
+                profiles_context += f"- {spk_id}: {desc}\n"
+                
+        prompt = f"""
 Analyze this audio segment. You must output a JSON list of dialogue segments with timestamps, original spoken text, and exact Vietnamese translation. 
 Also, classify the gender of the speaker for each segment as male or female based on the speaker voice sound.
-In addition, differentiate between distinct speakers in the audio. Assign a unique "speaker_id" to each segment representing who is speaking (for example, "male_1", "male_2", "female_1", "female_2").
+In addition, differentiate between distinct speakers in the audio. Assign a unique "speaker_id" to each segment representing who is speaking.
+{profiles_context}
+If a speaker matches an existing profile listed above, you MUST use that exact "speaker_id". If it is a new speaker, create a new "speaker_id" (e.g. if the last one was male_2, make it male_3).
+For EACH segment, provide a "vocal_description" (less than 20 words describing the voice characteristics like pitch, tone, age, speed, or conversational role in this segment).
+In addition, evaluate the emotion and vocal emotion tone for each segment based on the context and sound. Classify it into one of these emotions: "neutral", "excited", "angry", "whisper", "scared", "crying", "sad".
 
 Format the output strictly as a JSON array of objects, with these fields:
 [
-  {
-    "start": 0.00,  // start time in seconds (relative to this audio segment)
-    "end": 2.50,    // end time in seconds (relative to this audio segment)
+  {{
+    "start": 0.00,
+    "end": 2.50,
     "original_text": "text in original language",
     "text": "Vietnamese translation text",
     "gender": "male" or "female",
-    "speaker_id": "male_1"
-  }
+    "speaker_id": "male_1",
+    "vocal_description": "short description of voice quality and conversation role",
+    "emotion": "neutral" or "excited" or "angry" or "whisper" or "scared" or "crying" or "sad"
+  }}
 ]
 
 Respond ONLY with this JSON array. No markdown formatting, no code blocks, just raw JSON.
 """
 
-    for chunk_file, time_offset in chunks:
-        print(f"[AI Service] Processing chunk: {os.path.basename(chunk_file)} (Start offset: {time_offset} seconds)")
-        
         try:
             # Upload via Gemini Files API
             uploaded_file = genai.upload_file(path=chunk_file)
@@ -169,7 +199,6 @@ Respond ONLY with this JSON array. No markdown formatting, no code blocks, just 
                 
             content = response.text.strip()
             
-            # Strip markdown indicators if output isn't clean
             if content.startswith("```"):
                 lines = content.split("\n")
                 if lines[0].startswith("```"):
@@ -181,21 +210,28 @@ Respond ONLY with this JSON array. No markdown formatting, no code blocks, just 
             chunk_data = json.loads(content)
             
             for item in chunk_data:
-                # Synchronize timeline offsets back to global scope
+                spk_id = item.get("speaker_id")
+                vocal_desc = item.get("vocal_description", "")
+                
+                # Check and persist new speaker profiles
+                if spk_id and vocal_desc and spk_id not in global_speaker_profiles:
+                    global_speaker_profiles[spk_id] = vocal_desc
+                    
+                gender_val = item.get("gender", "female")
                 global_segments.append({
                     "id": seg_counter,
                     "start": float(item["start"]) + time_offset,
                     "end": float(item["end"]) + time_offset,
                     "original_text": item["original_text"],
                     "text": item["text"],
-                    "gender": item.get("gender", "female"),
-                    "speaker_id": item.get("speaker_id", f"{item.get('gender', 'female')}_1")
+                    "gender": gender_val,
+                    "speaker_id": spk_id or f"{gender_val}_1",
+                    "emotion": item.get("emotion", "neutral")
                 })
                 seg_counter += 1
                 
         except Exception as chunk_error:
             print(f"[AI Service] Failed on chunk {chunk_file}: {chunk_error}")
-            # If sub-chunk fails, don't crash everything so we have partial result or attempt retry.
             pass
         finally:
             # Delete local sub-chunk file if it's not the original file
@@ -249,7 +285,9 @@ def transcribe_and_translate(
                 "end": float(seg.end),
                 "original_text": orig_text,
                 "text": vietnamese_text,
-                "gender": gender
+                "gender": gender,
+                "speaker_id": f"{gender}_1",
+                "emotion": "neutral"
             })
             
         return {

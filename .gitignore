@@ -24,6 +24,10 @@ backend/temp/
 backend/downloads/
 backend/outputs/
 backend/voices/designed/
+Video/
+*.mp4
+*.wav
+*.mp3
 
 # OS Files
 .DS_Store

@@ -76,6 +76,7 @@ export default function App() {
   const [segments, setSegments] = useState<Segment[]>([]);
   const [voices, setVoices] = useState<Voice[]>([]);
   const [finalVideo, setFinalVideo] = useState<FinalVideo | null>(null);
+  const [videoAspectRatio, setVideoAspectRatio] = useState<number | null>(null);
   
   // Custom Voice Assignment state
   const [defaultMaleVoice, setDefaultMaleVoice] = useState("instruct_male_low");
@@ -126,6 +127,7 @@ export default function App() {
   const [designerSaveName, setDesignerSaveName] = useState<string>("");
   const [isSavingDesign, setIsSavingDesign] = useState<boolean>(false);
   const designerAudioRef = useRef<HTMLAudioElement | null>(null);
+  const [hasDraft, setHasDraft] = useState<boolean>(false);
 
   const handleVideoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -152,6 +154,7 @@ export default function App() {
           url: data.url
         });
         setSegments([]);
+        setVideoAspectRatio(null);
         addLog(`Đã nạp video local thành công: ${data.title} (${Math.round(data.duration)} giây)`, "success");
       } else {
         addLog(`Lỗi tải lên video: ${data.message || data.detail || "Không rõ"}`, "error");
@@ -391,6 +394,133 @@ export default function App() {
     localStorage.setItem("gemini_api_key", geminiKey);
   }, [geminiKey]);
 
+  // Read draft status on mount
+  useEffect(() => {
+    const savedDraft = localStorage.getItem("vredub_draft_v1");
+    if (savedDraft) {
+      setHasDraft(true);
+    }
+  }, []);
+
+  // Autosave when changes occur
+  useEffect(() => {
+    if (!downloadInfo) return;
+    const draft = {
+      downloadInfo,
+      segments,
+      segmentVoices,
+      defaultMaleVoice,
+      defaultFemaleVoice,
+      videoOptions: {
+        zoomLevel,
+        zoomAlign,
+        brightness,
+        contrast,
+        saturation,
+        hflip,
+        rotateAngle,
+        enableDynamicPan,
+        coverSub,
+        coverColor,
+        coverHOffset,
+        coverYPos,
+        coverWPct,
+        coverXPct,
+        coverAutoFit,
+        originalVol,
+        ttsVol,
+        enableDucking,
+        duckingVolume,
+        enableDubbing,
+        videoSpeed,
+        aspectRatioMode,
+        subMarginV
+      }
+    };
+    localStorage.setItem("vredub_draft_v1", JSON.stringify(draft));
+  }, [
+    downloadInfo,
+    segments,
+    segmentVoices,
+    defaultMaleVoice,
+    defaultFemaleVoice,
+    zoomLevel,
+    zoomAlign,
+    brightness,
+    contrast,
+    saturation,
+    hflip,
+    rotateAngle,
+    enableDynamicPan,
+    coverSub,
+    coverColor,
+    coverHOffset,
+    coverYPos,
+    coverWPct,
+    coverXPct,
+    coverAutoFit,
+    originalVol,
+    ttsVol,
+    enableDucking,
+    duckingVolume,
+    enableDubbing,
+    videoSpeed,
+    aspectRatioMode,
+    subMarginV
+  ]);
+
+  const handleRestoreDraft = () => {
+    try {
+      const savedDraft = localStorage.getItem("vredub_draft_v1");
+      if (!savedDraft) return;
+      const draft = JSON.parse(savedDraft);
+      if (draft.downloadInfo) setDownloadInfo(draft.downloadInfo);
+      if (draft.segments) setSegments(draft.segments);
+      if (draft.segmentVoices) setSegmentVoices(draft.segmentVoices);
+      if (draft.defaultMaleVoice) setDefaultMaleVoice(draft.defaultMaleVoice);
+      if (draft.defaultFemaleVoice) setDefaultFemaleVoice(draft.defaultFemaleVoice);
+      
+      const opt = draft.videoOptions || {};
+      if (opt.zoomLevel !== undefined) setZoomLevel(opt.zoomLevel);
+      if (opt.zoomAlign !== undefined) setZoomAlign(opt.zoomAlign);
+      if (opt.brightness !== undefined) setBrightness(opt.brightness);
+      if (opt.contrast !== undefined) setContrast(opt.contrast);
+      if (opt.saturation !== undefined) setSaturation(opt.saturation);
+      if (opt.hflip !== undefined) setHflip(opt.hflip);
+      if (opt.rotateAngle !== undefined) setRotateAngle(opt.rotateAngle);
+      if (opt.enableDynamicPan !== undefined) setEnableDynamicPan(opt.enableDynamicPan);
+      
+      if (opt.coverSub !== undefined) setCoverSub(opt.coverSub);
+      if (opt.coverColor !== undefined) setCoverColor(opt.coverColor);
+      if (opt.coverHOffset !== undefined) setCoverHOffset(opt.coverHOffset);
+      if (opt.coverYPos !== undefined) setCoverYPos(opt.coverYPos);
+      if (opt.coverWPct !== undefined) setCoverWPct(opt.coverWPct);
+      if (opt.coverXPct !== undefined) setCoverXPct(opt.coverXPct);
+      if (opt.coverAutoFit !== undefined) setCoverAutoFit(opt.coverAutoFit);
+      
+      if (opt.originalVol !== undefined) setOriginalVol(opt.originalVol);
+      if (opt.ttsVol !== undefined) setTtsVol(opt.ttsVol);
+      if (opt.enableDucking !== undefined) setEnableDucking(opt.enableDucking);
+      if (opt.duckingVolume !== undefined) setDuckingVolume(opt.duckingVolume);
+      if (opt.enableDubbing !== undefined) setEnableDubbing(opt.enableDubbing);
+      
+      if (opt.videoSpeed !== undefined) setVideoSpeed(opt.videoSpeed);
+      if (opt.aspectRatioMode !== undefined) setAspectRatioMode(opt.aspectRatioMode);
+      if (opt.subMarginV !== undefined) setSubMarginV(opt.subMarginV);
+      
+      addLog("Khôi phục bản nháp tiến trình thành công!", "success");
+      setHasDraft(false);
+    } catch (e: any) {
+      addLog(`Lỗi phục hồi bản nháp: ${e.message}`, "error");
+    }
+  };
+
+  const handleDiscardDraft = () => {
+    localStorage.removeItem("vredub_draft_v1");
+    setHasDraft(false);
+    addLog("Đã bỏ qua & xóa bản nháp cũ.", "info");
+  };
+
 
 
   // Autoscroll logs
@@ -420,6 +550,38 @@ export default function App() {
     setLogs((prev) => [...prev, { text, type, time: timestamp }]);
   };
 
+  const startSSEListener = (
+    taskId: string,
+    onSuccess: (result: any) => void,
+    onFailure: (errorMsg: string) => void,
+    onProgress: (pct: number, msg: string) => void
+  ) => {
+    const eventSource = new EventSource(`${BACKEND_URL}/api/tasks/${taskId}/progress`);
+    
+    eventSource.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        onProgress(data.progress, data.message);
+        
+        if (data.status === "completed") {
+          eventSource.close();
+          onSuccess(data.result);
+        } else if (data.status === "failed") {
+          eventSource.close();
+          onFailure(data.error || data.message || "Tác vụ thất bại.");
+        }
+      } catch (e: any) {
+        eventSource.close();
+        onFailure(`Lỗi dữ liệu tiến độ: ${e.message}`);
+      }
+    };
+    
+    eventSource.onerror = () => {
+      eventSource.close();
+      onFailure("Mất kết nối với máy chủ theo dõi tiến độ.");
+    };
+  };
+
   // 1. Tải Video
   const handleDownload = async () => {
     if (!url.trim()) {
@@ -432,6 +594,7 @@ export default function App() {
     setSegments([]);
     setFinalVideo(null);
     setSegmentVoices({});
+    setVideoAspectRatio(null);
     
     addLog("Bắt đầu tải video từ URL...", "info");
     addLog(`Đang gửi yêu cầu download yt-dlp cho URL: ${url}`, "info");
@@ -448,15 +611,33 @@ export default function App() {
         throw new Error(errText || "Tải video thất bại.");
       }
       
-      const data: DownloadInfo = await res.json();
-      setDownloadInfo(data);
-      addLog(`Lưu video gốc thành công: ${data.filename}`, "success");
-      addLog(`Tiêu đề: "${data.title}" (${Math.round(data.duration)} giây)`, "success");
-      addLog("Đã tách âm thanh WAV thành công. Bạn có thể tiến hành tách phụ đề Whisper.", "info");
-      setActivePlayerTab("original");
+      const resData = await res.json();
+      if (!resData.success || !resData.task_id) {
+        throw new Error("Không nhận được ID tiến trình tải.");
+      }
+      
+      addLog(`Đã đăng ký tác vụ tải ngầm. ID: ${resData.task_id}`, "info");
+      
+      startSSEListener(
+        resData.task_id,
+        (result) => {
+          setDownloadInfo(result);
+          addLog(`Lưu video gốc thành công: ${result.filename}`, "success");
+          addLog(`Tiêu đề: "${result.title}" (${Math.round(result.duration)} giây)`, "success");
+          addLog("Đã tách âm thanh WAV thành công. Bạn có thể tiến hành tách phụ đề Whisper.", "info");
+          setActivePlayerTab("original");
+          setIsDownloading(false);
+        },
+        (errorMsg) => {
+          addLog(`Lỗi tải video: ${errorMsg}`, "error");
+          setIsDownloading(false);
+        },
+        (pct, msg) => {
+          addLog(`[Tiến trình tải ${pct}%] ${msg}`, "info");
+        }
+      );
     } catch (err: any) {
       addLog(`Lỗi tải video: ${err.message}`, "error");
-    } finally {
       setIsDownloading(false);
     }
   };
@@ -493,21 +674,38 @@ export default function App() {
         throw new Error(errorText || "Tách tiếng thất bại.");
       }
       
-      const data = await res.json();
-      setSegments(data.segments || []);
+      const resData = await res.json();
+      if (!resData.success || !resData.task_id) {
+        throw new Error("Không nhận được ID bộ phiên phiên âm.");
+      }
       
-      // Auto-assign default voices by gender recommendation
-      const initialAssignments: Record<string, string> = {};
-      data.segments.forEach((seg: Segment) => {
-        initialAssignments[`seg_${seg.id}`] = seg.gender === "male" ? defaultMaleVoice : defaultFemaleVoice;
-      });
-      setSegmentVoices(initialAssignments);
+      addLog(`Tác vụ dịch chạy ngầm đã kích hoạt. ID: ${resData.task_id}`, "info");
       
-      addLog(`Tách hội thoại hoàn tất! Tìm thấy ${data.segments.length} câu thoại dịch Việt.`, "success");
-
+      startSSEListener(
+        resData.task_id,
+        (result) => {
+          setSegments(result.segments || []);
+          
+          // Auto-assign default voices by gender recommendation
+          const initialAssignments: Record<string, string> = {};
+          result.segments.forEach((seg: Segment) => {
+            initialAssignments[`seg_${seg.id}`] = seg.gender === "male" ? defaultMaleVoice : defaultFemaleVoice;
+          });
+          setSegmentVoices(initialAssignments);
+          
+          addLog(`Tách hội thoại hoàn tất! Tìm thấy ${result.segments.length} câu thoại dịch Việt.`, "success");
+          setIsTranscribing(false);
+        },
+        (errorMsg) => {
+          addLog(`Lỗi phiên dịch: ${errorMsg}`, "error");
+          setIsTranscribing(false);
+        },
+        (pct, msg) => {
+          addLog(`[Tiến trình dịch ${pct}%] ${msg}`, "info");
+        }
+      );
     } catch (err: any) {
       addLog(`Lỗi nhận diện giọng nói: ${err.message}`, "error");
-    } finally {
       setIsTranscribing(false);
     }
   };
@@ -575,18 +773,36 @@ export default function App() {
         throw new Error(errorText || "Lồng tiếng và chỉnh sửa video thất bại.");
       }
       
-      const data: FinalVideo = await res.json();
-      setFinalVideo(data);
-      addLog("Lồng tiếng Omni TTS thành công!", "success");
-      addLog(`FFmpeg biên dựng video lách bản quyền hoàn tất: ${data.filename}`, "success");
-      addLog(`Dung lượng video: ${(data.size_bytes / (1024 * 1024)).toFixed(2)} MB`, "success");
+      const resData = await res.json();
+      if (!resData.success || !resData.task_id) {
+        throw new Error("Không nhận được ID kết xuất video.");
+      }
       
-      // Auto toggle to dubbed view
-      setActivePlayerTab("dubbed");
-      addLog("Hoàn thành! Bạn có thể xem kết quả lồng tiếng lách bản quyền.", "success");
+      addLog(`Lệnh render đã vào hàng đợi của hệ thống. ID: ${resData.task_id}`, "info");
+      
+      startSSEListener(
+        resData.task_id,
+        (result) => {
+          setFinalVideo(result);
+          addLog("Lồng tiếng Omni TTS thành công!", "success");
+          addLog(`FFmpeg biên dựng video lách bản quyền hoàn tất: ${result.filename}`, "success");
+          addLog(`Dung lượng video: ${(result.size_bytes / (1024 * 1024)).toFixed(2)} MB`, "success");
+          
+          // Auto toggle to dubbed view
+          setActivePlayerTab("dubbed");
+          addLog("Hoàn thành! Bạn có thể xem kết quả lồng tiếng lách bản quyền.", "success");
+          setIsDubbing(false);
+        },
+        (errorMsg) => {
+          addLog(`Lỗi xử lý video: ${errorMsg}`, "error");
+          setIsDubbing(false);
+        },
+        (pct, msg) => {
+          addLog(`[Tiến trình Render ${pct}%] ${msg}`, "info");
+        }
+      );
     } catch (err: any) {
       addLog(`Lỗi xử lý video: ${err.message}`, "error");
-    } finally {
       setIsDubbing(false);
     }
   };
@@ -1268,6 +1484,23 @@ export default function App() {
             )}
           </div>
 
+          {/* Draft Notification Banner */}
+          {hasDraft && !downloadInfo && (
+            <div className="subtly-boxed" style={{ margin: "16px 20px 0 20px", border: "1px dashed var(--color-primary)", display: "flex", justifyContent: "space-between", alignItems: "center", backgroundColor: "rgba(255, 215, 0, 0.05)", padding: "12px 16px", borderRadius: "8px" }}>
+              <div style={{ color: "#fff", fontSize: "13px", display: "flex", alignItems: "center", gap: "6px" }}>
+                <span>💡</span> <span>Phát hiện bản nháp phiên làm việc trước chưa lưu. Bạn có muốn phục hồi không?</span>
+              </div>
+              <div style={{ display: "flex", gap: "8px" }}>
+                <button className="btn-accent" onClick={handleRestoreDraft} style={{ padding: "4px 12px", fontSize: "12px", height: "auto" }}>
+                  Khôi phục
+                </button>
+                <button className="btn-secondary" onClick={handleDiscardDraft} style={{ padding: "4px 12px", fontSize: "12px", height: "auto" }}>
+                  Bỏ qua
+                </button>
+              </div>
+            </div>
+          )}
+
           {/* Subtitles Workspace area */}
           <div className="subtitles-workspace">
             {!downloadInfo ? (
@@ -1513,38 +1746,60 @@ export default function App() {
           </div>
 
           {/* Media Player */}
-          <div className="media-viewport" style={{ position: "relative" }}>
+          <div className="media-viewport" style={{ display: "flex", justifyContent: "center", alignItems: "center", position: "relative", overflow: "hidden" }}>
             {activePlayerTab === "original" && downloadInfo ? (
-              <video 
-                src={`${BACKEND_URL}/api/preview/${downloadInfo.filename}`} 
-                controls 
-              />
+              <div style={{ position: "relative", height: "100%", aspectRatio: videoAspectRatio ? String(videoAspectRatio) : "auto", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                <video 
+                  src={`${BACKEND_URL}/api/preview/${downloadInfo.filename}`} 
+                  controls 
+                  style={{ width: "100%", height: "100%", objectFit: "contain" }}
+                  onLoadedMetadata={(e) => setVideoAspectRatio(e.currentTarget.videoWidth / e.currentTarget.videoHeight)}
+                />
+                {coverSub && (
+                  <div 
+                    style={{
+                      position: "absolute",
+                      left: `${coverXPct * 100}%`,
+                      width: `${coverWPct * 100}%`,
+                      top: `${coverYPos * 100}%`,
+                      height: `${(coverHOffset / 720) * 100}%`,
+                      backgroundColor: coverColor === "gold" ? "#ffff00" : (coverColor === "black" ? "#000000" : (coverColor === "white" ? "#ffffff" : coverColor)),
+                      opacity: 0.95,
+                      pointerEvents: "none",
+                      zIndex: 2
+                    }}
+                  />
+                )}
+              </div>
             ) : activePlayerTab === "dubbed" && finalVideo ? (
-              <video 
-                src={`${BACKEND_URL}/api/preview/${finalVideo.filename}`} 
-                controls 
-              />
+              <div style={{ position: "relative", height: "100%", aspectRatio: videoAspectRatio ? String(videoAspectRatio) : "auto", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                <video 
+                  src={`${BACKEND_URL}/api/preview/${finalVideo.filename}`} 
+                  controls 
+                  style={{ width: "100%", height: "100%", objectFit: "contain" }}
+                  onLoadedMetadata={(e) => setVideoAspectRatio(e.currentTarget.videoWidth / e.currentTarget.videoHeight)}
+                />
+                {coverSub && (
+                  <div 
+                    style={{
+                      position: "absolute",
+                      left: `${coverXPct * 100}%`,
+                      width: `${coverWPct * 100}%`,
+                      top: `${coverYPos * 100}%`,
+                      height: `${(coverHOffset / 720) * 100}%`,
+                      backgroundColor: coverColor === "gold" ? "#ffff00" : (coverColor === "black" ? "#000000" : (coverColor === "white" ? "#ffffff" : coverColor)),
+                      opacity: 0.95,
+                      pointerEvents: "none",
+                      zIndex: 2
+                    }}
+                  />
+                )}
+              </div>
             ) : (
               <div className="viewport-placeholder">
                 <FileVideo size={40} />
                 <span>Không có nguồn video hiển thị</span>
               </div>
-            )}
-
-            {coverSub && (downloadInfo || finalVideo) && (
-              <div 
-                style={{
-                  position: "absolute",
-                  left: `${coverXPct * 100}%`,
-                  width: `${coverWPct * 100}%`,
-                  top: `${coverYPos * 100}%`,
-                  height: `${(coverHOffset / 720) * 100}%`,
-                  backgroundColor: coverColor === "gold" ? "#ffff00" : (coverColor === "black" ? "#000000" : (coverColor === "white" ? "#ffffff" : coverColor)),
-                  opacity: 0.95,
-                  pointerEvents: "none",
-                  zIndex: 2
-                }}
-              />
             )}
           </div>
 
@@ -1596,33 +1851,34 @@ export default function App() {
             {/* Left: Video Player */}
             <div style={{ flex: 1.5, background: "#000", borderRadius: "12px", border: "1px solid rgba(255,255,255,0.08)", overflow: "hidden", display: "flex", justifyContent: "center", alignItems: "center", position: "relative" }}>
               {downloadInfo ? (
-                <video 
-                  src={`${BACKEND_URL}/api/preview/${activePlayerTab === "dubbed" && finalVideo ? finalVideo.filename : downloadInfo.filename}`} 
-                  controls 
-                  style={{ maxWidth: "100%", maxHeight: "100%" }}
-                />
+                <div style={{ position: "relative", height: "100%", aspectRatio: videoAspectRatio ? String(videoAspectRatio) : "auto", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                  <video 
+                    src={`${BACKEND_URL}/api/preview/${activePlayerTab === "dubbed" && finalVideo ? finalVideo.filename : downloadInfo.filename}`} 
+                    controls 
+                    style={{ width: "100%", height: "100%", objectFit: "contain" }}
+                    onLoadedMetadata={(e) => setVideoAspectRatio(e.currentTarget.videoWidth / e.currentTarget.videoHeight)}
+                  />
+                  {coverSub && (
+                    <div 
+                      style={{
+                        position: "absolute",
+                        left: `${coverXPct * 100}%`,
+                        width: `${coverWPct * 100}%`,
+                        top: `${coverYPos * 100}%`,
+                        height: `${(coverHOffset / 720) * 100}%`,
+                        backgroundColor: coverColor === "gold" ? "#ffff00" : (coverColor === "black" ? "#000000" : (coverColor === "white" ? "#ffffff" : coverColor)),
+                        opacity: 0.95,
+                        pointerEvents: "none",
+                        zIndex: 2
+                      }}
+                    />
+                  )}
+                </div>
               ) : (
                 <div style={{ display: "flex", flexDirection: "column", gap: "8px", alignItems: "center", color: "var(--text-muted)" }}>
                   <FileVideo size={48} />
                   <span>Hãy tải video ở Studio trước</span>
                 </div>
-              )}
-
-              {/* Subtitle cover-up overlay */}
-              {coverSub && (downloadInfo || finalVideo) && (
-                <div 
-                  style={{
-                    position: "absolute",
-                    left: `${coverXPct * 100}%`,
-                    width: `${coverWPct * 100}%`,
-                    top: `${coverYPos * 100}%`,
-                    height: `${(coverHOffset / 720) * 100}%`,
-                    backgroundColor: coverColor === "gold" ? "#ffff00" : (coverColor === "black" ? "#000000" : (coverColor === "white" ? "#ffffff" : coverColor)),
-                    opacity: 0.95,
-                    pointerEvents: "none",
-                    zIndex: 2
-                  }}
-                />
               )}
             </div>
 

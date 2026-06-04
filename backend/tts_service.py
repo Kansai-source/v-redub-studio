@@ -81,6 +81,40 @@ def clean_tts_text(text: str) -> str:
     text = text.replace("  ", " ").strip()
     return text
 
+def get_dynamic_speaker_instruct(speaker_id: str, default_gender: str, emotion: str = "neutral") -> str:
+    """Generates a unique OmniVoice prompt dynamically based on the speaker_id and emotion."""
+    if not speaker_id:
+        gender = "male" if default_gender == "male" else "female"
+    else:
+        speaker_id_clean = speaker_id.lower().strip()
+        gender = "male" if "male" in speaker_id_clean else default_gender
+
+    # Default variations based on speaker identity (name/number hash)
+    speaker_id_clean = (speaker_id or "").lower().strip()
+    match = re.search(r'\d+', speaker_id_clean)
+    num = int(match.group()) if match else hash(speaker_id_clean or "default")
+    
+    # Variations arrays
+    pitches = ["very low", "low", "moderate", "high", "very high"]
+    ages = ["teenager", "young adult", "middle-aged"]
+    
+    pitch = pitches[num % len(pitches)]
+    age = ages[(num // len(pitches)) % len(ages)]
+    
+    # Emotion instruction mapping
+    emotion_instructs = {
+        "excited": "excited and energetic tone, speaking with enthusiasm",
+        "angry": "angry and harsh tone, speaking with aggression",
+        "whisper": "soft whispering voice, absolute quiet background",
+        "scared": "fearful and trembling tone, speaking with panic",
+        "crying": "sad and crying tone, showing grief",
+        "sad": "sad and low tone, showing sorrow",
+        "neutral": "natural and clear tone"
+    }
+    em_tone = emotion_instructs.get((emotion or "neutral").lower().strip(), "natural and clear tone")
+    
+    return f"{gender}, {pitch} pitch, {age}, {em_tone}"
+
 def generate_voiceover(
     segments: list, 
     voice_definitions: dict,
@@ -145,7 +179,18 @@ def generate_voiceover(
             if voice_meta["type"] == "clone":
                 audio = model.generate(text=text, ref_audio=voice_meta["file_path"], **kwargs)
             else:
-                audio = model.generate(text=text, instruct=voice_meta["instruct"], **kwargs)
+                speaker_id = seg.get("speaker_id")
+                if speaker_id:
+                    dynamic_instruct = get_dynamic_speaker_instruct(
+                        speaker_id, 
+                        seg.get("gender", "female"),
+                        seg.get("emotion", "neutral")
+                    )
+                    print(f"[TTS Service] Using dynamic diversified instruct '{dynamic_instruct}' for speaker '{speaker_id}'")
+                    audio = model.generate(text=text, instruct=dynamic_instruct, **kwargs)
+                else:
+                    audio = model.generate(text=text, instruct=voice_meta["instruct"], **kwargs)
+
                 
             # audio[0] is typically a numpy array of shape (samples,) representing sample data
             seg_samples = audio[0]
@@ -155,6 +200,16 @@ def generate_voiceover(
             # If mono array is 2D, squeeze to 1D
             if len(seg_samples.shape) > 1:
                 seg_samples = seg_samples.squeeze()
+                
+            # Auto-Speed Matching: If tts is longer than segment time, stretch (speed up) to avoid cut-off
+            raw_duration = len(seg_samples) / float(sample_rate)
+            seg_duration = float(seg["end"]) - float(seg["start"])
+            if seg_duration > 0 and raw_duration > (seg_duration + 0.1):
+                new_num_samples = int(seg_duration * sample_rate)
+                old_indices = np.arange(len(seg_samples))
+                new_indices = np.linspace(0, len(seg_samples) - 1, new_num_samples)
+                seg_samples = np.interp(new_indices, old_indices, seg_samples).astype(np.float32)
+                print(f"[TTS Service] Auto-Speed Match: Sped up segment {seg['id']} ({raw_duration:.2f}s -> {seg_duration:.2f}s)")
                 
             # Map segment onto global timeline
             start_time = float(seg["start"])

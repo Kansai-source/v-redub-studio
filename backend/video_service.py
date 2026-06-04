@@ -241,7 +241,26 @@ def process_video_effects(
         shutil.copy2(srt_path, os.path.join(TEMP_DIR, temp_srt_name))
         escaped_srt = f"./{temp_srt_name}"
         subtitle_margin_v = int(options.get("subtitle_margin_v", 20))
-        vf_list.append(f"subtitles={escaped_srt}:force_style='FontSize=16,Alignment=2,PrimaryColour=&H00FFFF,MarginV={subtitle_margin_v}'")
+        
+        # Auto-adjust subtitle text color and dimensions based on cover box to avoid text clashing
+        sub_color = "&H00FFFF"  # Default yellow
+        font_size = 16
+        if cover_sub:
+            # 1. Color contrast
+            raw_color = cover_color.lower().strip()
+            if raw_color in ("gold", "yellow", "white"):
+                sub_color = "&H000000"  # Black text for light backgrounds
+            else:
+                sub_color = "&H00FFFF"  # Yellow text for dark backgrounds
+                
+            # 2. Automated sizing & vertical centering (720px baseline height)
+            font_size = max(13, min(28, int(cover_h_px * 0.45)))
+            computed_margin = 720 * (1.0 - cover_y_pct) - (cover_h_px / 2.0) - (font_size / 2.0) + 2
+            subtitle_margin_v = max(5, min(700, int(computed_margin)))
+        else:
+            subtitle_margin_v = int(options.get("subtitle_margin_v", 20))
+                
+        vf_list.append(f"subtitles={escaped_srt}:force_style='FontSize={font_size},Alignment=2,PrimaryColour={sub_color},OutlineColour=&H000000,Outline=1.5,MarginV={subtitle_margin_v}'")
         
     # 2d. Apply speed (should be done after burn-in subtitles so timeline matches, and at the end of vf chain)
     if speed != 1.0:
@@ -285,11 +304,33 @@ def process_video_effects(
                 "-map", "[a]"
             ]
         
-    # Output video codec settings. libx264 is high compatibility. 
+    # Output video codec settings. GPU acceleration if NVIDIA NVENC is available.
+    _has_nvenc = False
+    try:
+        startupinfo_probe = None
+        if sys.platform == "win32":
+            startupinfo_probe = subprocess.STARTUPINFO()
+            startupinfo_probe.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo_probe.wShowWindow = 0
+        res_probe = subprocess.run(["ffmpeg", "-encoders"], capture_output=True, text=True, startupinfo=startupinfo_probe)
+        _has_nvenc = "h264_nvenc" in res_probe.stdout
+    except Exception:
+        _has_nvenc = False
+
+    if _has_nvenc:
+        print("[FFmpeg] Nvidia hardware acceleration active (h264_nvenc).")
+        args += [
+            "-c:v", "h264_nvenc",
+            "-preset", "fast"
+        ]
+    else:
+        args += [
+            "-c:v", "libx264",
+            "-preset", "fast",
+            "-crf", "22"
+        ]
+
     args += [
-        "-c:v", "libx264",
-        "-preset", "fast",
-        "-crf", "22",
         "-c:a", "aac",
         "-b:a", "192k",
         output_video_path

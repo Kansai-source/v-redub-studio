@@ -3,6 +3,10 @@ import sys
 import time
 import re
 import uvicorn
+import uuid
+import threading
+import json
+import asyncio
 
 # Add parent directory of backend folder to sys.path to enable backend module imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -256,136 +260,276 @@ def stream_video(filename: str):
         raise HTTPException(404, "Video file not found")
     return FileResponse(video_path, media_type="video/mp4")
 
+# In-memory background task database
+jobs = {}
+jobs_lock = threading.Lock()
+
+def run_download_worker(task_id: str, url: str):
+    try:
+        with jobs_lock:
+            jobs[task_id] = {"status": "processing", "progress": 10, "message": "Khởi chạy tải video...", "result": None, "error": None}
+            
+        with jobs_lock:
+            jobs[task_id]["progress"] = 30
+            jobs[task_id]["message"] = "Đang tải luồng video/audio yt-dlp..."
+        result = download_video(url)
+        if not result.get("success"):
+            raise Exception(f"Tải video thất bại: {result.get('error')}")
+            
+        video_path = result["file_path"]
+        filename_no_ext = os.path.splitext(result["filename"])[0]
+        audio_path = os.path.join(TEMP_DIR, f"{filename_no_ext}_orig.wav")
+        
+        with jobs_lock:
+            jobs[task_id]["progress"] = 70
+            jobs[task_id]["message"] = "Đang trích xuất dải âm thanh gốc từ video..."
+        audio_success = extract_audio(video_path, audio_path)
+        
+        result["audio_path"] = audio_path if audio_success else None
+        
+        with jobs_lock:
+            jobs[task_id]["status"] = "completed"
+            jobs[task_id]["progress"] = 100
+            jobs[task_id]["message"] = "Tải video hoàn tất!"
+            jobs[task_id]["result"] = result
+    except Exception as e:
+        print(f"[Worker] Error in run_download_worker: {e}")
+        with jobs_lock:
+            jobs[task_id]["status"] = "failed"
+            jobs[task_id]["progress"] = 100
+            jobs[task_id]["message"] = f"Lỗi: {str(e)}"
+            jobs[task_id]["error"] = str(e)
+
+def run_transcribe_worker(task_id: str, video_path: str, mode: str, gemini_key: str, gemini_model: str):
+    try:
+        with jobs_lock:
+            jobs[task_id] = {"status": "processing", "progress": 10, "message": "Kiểm tra tập tin âm thanh...", "result": None, "error": None}
+            
+        filename_no_ext = os.path.splitext(os.path.basename(video_path))[0]
+        audio_path = os.path.join(TEMP_DIR, f"{filename_no_ext}_orig.wav")
+        
+        if not os.path.exists(audio_path):
+            with jobs_lock:
+                jobs[task_id]["progress"] = 30
+                jobs[task_id]["message"] = "Đang trích xuất âm thanh bị thiếu..."
+            extract_success = extract_audio(video_path, audio_path)
+            if not extract_success:
+                raise Exception("Không thể tách âm thanh từ tập tin video.")
+                
+        with jobs_lock:
+            jobs[task_id]["progress"] = 55
+            jobs[task_id]["message"] = f"Đang chạy phiên âm Whisper ({mode})..."
+            
+        result = transcribe_and_translate(
+            audio_path=audio_path,
+            mode=mode,
+            gemini_key=gemini_key,
+            gemini_model=gemini_model
+        )
+        
+        if not result.get("success"):
+            raise Exception(f"Phiên âm thất bại: {result.get('error')}")
+            
+        with jobs_lock:
+            jobs[task_id]["status"] = "completed"
+            jobs[task_id]["progress"] = 100
+            jobs[task_id]["message"] = "Phiên âm hoàn tất!"
+            jobs[task_id]["result"] = result
+    except Exception as e:
+        print(f"[Worker] Error in run_transcribe_worker: {e}")
+        with jobs_lock:
+            jobs[task_id]["status"] = "failed"
+            jobs[task_id]["progress"] = 100
+            jobs[task_id]["message"] = f"Lỗi: {str(e)}"
+            jobs[task_id]["error"] = str(e)
+
+def run_dub_and_edit_worker(
+    task_id: str,
+    video_path: str,
+    segments: list,
+    voice_definitions: dict,
+    video_options: dict
+):
+    try:
+        with jobs_lock:
+            jobs[task_id] = {"status": "processing", "progress": 10, "message": "Khởi chạy xuất video lồng tiếng...", "result": None, "error": None}
+            
+        filename = os.path.basename(video_path)
+        filename_no_ext = os.path.splitext(filename)[0]
+        timestamp = int(time.time())
+        
+        output_audio_path = os.path.join(TEMP_DIR, f"{filename_no_ext}_dubbed_{timestamp}.wav")
+        output_srt_path = os.path.join(TEMP_DIR, f"{filename_no_ext}_{timestamp}.srt")
+        final_video_filename = f"final_{filename_no_ext}_{timestamp}.mp4"
+        output_video_path = os.path.join(OUTPUTS_DIR, final_video_filename)
+        
+        import yt_dlp
+        duration = 30.0
+        try:
+            with yt_dlp.YoutubeDL({'quiet': True}) as ydl:
+                info = ydl.extract_info(video_path, download=False)
+                duration = info.get('duration', 30.0)
+        except Exception:
+            pass
+            
+        tts_success = False
+        enable_dubbing = video_options.get("enable_dubbing", True)
+        if enable_dubbing:
+            with jobs_lock:
+                jobs[task_id]["progress"] = 35
+                jobs[task_id]["message"] = "Đang sinh giọng thuyết minh tích hợp AI..."
+            tts_success = generate_voiceover(
+                segments=segments,
+                voice_definitions=voice_definitions,
+                total_duration=duration,
+                output_audio_path=output_audio_path
+            )
+        else:
+            with jobs_lock:
+                jobs[task_id]["progress"] = 35
+                jobs[task_id]["message"] = "Chế độ phụ đề thuần túy (Không thuyết minh)."
+                
+        with jobs_lock:
+            jobs[task_id]["progress"] = 65
+            jobs[task_id]["message"] = "Đang tạo phụ đề trung gian SRT..."
+            
+        save_segments_to_srt(segments, output_srt_path)
+        
+        options_dict = dict(video_options)
+        options_dict["srt_path"] = output_srt_path
+        if tts_success and os.path.exists(output_audio_path):
+            options_dict["tts_audio_path"] = output_audio_path
+            
+        with jobs_lock:
+            jobs[task_id]["progress"] = 85
+            jobs[task_id]["message"] = "Đang lọc hiệu ứng & đóng gói video bằng FFmpeg..."
+            
+        video_success = process_video_effects(
+            input_video_path=video_path,
+            output_video_path=output_video_path,
+            options=options_dict,
+            segments=segments
+        )
+        
+        if not video_success:
+            raise Exception("Lỗi khi kết xuất/lọc video FFmpeg.")
+            
+        try:
+            if os.path.exists(output_audio_path):
+                os.remove(output_audio_path)
+            if os.path.exists(output_srt_path):
+                os.remove(output_srt_path)
+        except Exception as cleanup_error:
+            print(f"[Worker] Cleanup warning: {cleanup_error}")
+            
+        result = {
+            "success": True,
+            "filename": final_video_filename,
+            "video_path": output_video_path,
+            "size_bytes": os.path.getsize(output_video_path),
+            "url": f"/api/preview/{final_video_filename}"
+        }
+        
+        with jobs_lock:
+            jobs[task_id]["status"] = "completed"
+            jobs[task_id]["progress"] = 100
+            jobs[task_id]["message"] = "Xuất video lồng tiếng thành công!"
+            jobs[task_id]["result"] = result
+            
+    except Exception as e:
+        print(f"[Worker] Error in run_dub_and_edit_worker: {e}")
+        with jobs_lock:
+            jobs[task_id]["status"] = "failed"
+            jobs[task_id]["progress"] = 100
+            jobs[task_id]["message"] = f"Lỗi: {str(e)}"
+            jobs[task_id]["error"] = str(e)
+
 @app.post("/api/download")
 def api_download(req: DownloadRequest):
-    """Downloads a video and extracts its original track."""
+    """Submits download request as background task."""
     url = req.url.strip()
     if not url:
         raise HTTPException(400, "URL cannot be empty")
         
-    print(f"[API] Received download request for URL: {url}")
-    # Download the video
-    result = download_video(url)
-    if not result.get("success"):
-        raise HTTPException(500, f"Download failed: {result.get('error')}")
-        
-    # Extract audio for Whisper transcription
-    video_path = result["file_path"]
-    filename_no_ext = os.path.splitext(result["filename"])[0]
-    audio_path = os.path.join(TEMP_DIR, f"{filename_no_ext}_orig.wav")
-    
-    print(f"[API] Extracting original audio: {audio_path}")
-    audio_success = extract_audio(video_path, audio_path)
-    
-    result["audio_path"] = audio_path if audio_success else None
-    return result
+    task_id = str(uuid.uuid4())
+    # Start thread
+    t = threading.Thread(target=run_download_worker, args=(task_id, url))
+    t.daemon = True
+    t.start()
+    return {"success": True, "task_id": task_id}
 
 @app.post("/api/transcribe")
 def api_transcribe(req: TranscribeRequest):
-    """Transcribes audio file to translate it into Vietnamese."""
-    video_path = req.file_path
-    
-    filename_no_ext = os.path.splitext(os.path.basename(video_path))[0]
-    audio_path = os.path.join(TEMP_DIR, f"{filename_no_ext}_orig.wav")
-    
-    # Extract audio if it doesn't already exist
-    if not os.path.exists(audio_path):
-        print(f"[API] Extracting missing audio: {audio_path}")
-        extract_success = extract_audio(video_path, audio_path)
-        if not extract_success:
-            raise HTTPException(500, "Failed to extract audio track from video file.")
-            
-    result = transcribe_and_translate(
-        audio_path=audio_path,
-        mode=req.mode,
-        gemini_key=req.gemini_key,
-        gemini_model=req.gemini_model
+    """Submits transcription request as background task."""
+    task_id = str(uuid.uuid4())
+    # Start thread
+    t = threading.Thread(
+        target=run_transcribe_worker,
+        args=(task_id, req.file_path, req.mode, req.gemini_key, req.gemini_model)
     )
-    
-    if not result.get("success"):
-        raise HTTPException(500, f"Transcription failed: {result.get('error')}")
-        
-    return result
+    t.daemon = True
+    t.start()
+    return {"success": True, "task_id": task_id}
 
 @app.post("/api/dub-and-edit")
 def api_dub_and_edit(req: DubAndEditRequest):
-    """Generates voiceovers, combines effect filters, and renders final video."""
+    """Submits video render and dub request as background task."""
     video_path = req.video_path
     if not os.path.exists(video_path):
         raise HTTPException(404, "Original video file not found")
         
-    filename = os.path.basename(video_path)
-    filename_no_ext = os.path.splitext(filename)[0]
-    timestamp = int(time.time())
-    
-    # 1. Output files paths
-    output_audio_path = os.path.join(TEMP_DIR, f"{filename_no_ext}_dubbed_{timestamp}.wav")
-    output_srt_path = os.path.join(TEMP_DIR, f"{filename_no_ext}_{timestamp}.srt")
-    final_video_filename = f"final_{filename_no_ext}_{timestamp}.mp4"
-    output_video_path = os.path.join(OUTPUTS_DIR, final_video_filename)
-    
-    # 2. Get video duration (to allocate silence timeline track)
-    import yt_dlp
-    duration = 30.0 # Default fallback
-    try:
-        with yt_dlp.YoutubeDL({'quiet': True}) as ydl:
-            info = ydl.extract_info(video_path, download=False)
-            duration = info.get('duration', 30.0)
-    except Exception:
-        # Check size or use ffmpeg duration check
-        pass
-        
-    # 3. Create dubbed speech
-    tts_success = False
-    enable_dubbing = req.video_options.enable_dubbing
-    if enable_dubbing:
-        print("[API] Synthesizing dubbed voices...")
-        tts_success = generate_voiceover(
-            segments=req.segments,
-            voice_definitions=req.voice_definitions,
-            total_duration=duration,
-            output_audio_path=output_audio_path
-        )
-    else:
-        print("[API] Skipping TTS voice synthesis (VietSub Only mode is active).")
-    
-    # 4. Generate subtitles SRT
-    print("[API] Preparing SRT subtitles...")
-    save_segments_to_srt(req.segments, output_srt_path)
-    
-    # 5. Build and inject options to video builder
-    options_dict = req.video_options.dict()
-    options_dict["srt_path"] = output_srt_path
-    if tts_success and os.path.exists(output_audio_path):
-        options_dict["tts_audio_path"] = output_audio_path
-        
-    print("[API] Invoking video effects rendering pass...")
-    video_success = process_video_effects(
-        input_video_path=video_path,
-        output_video_path=output_video_path,
-        options=options_dict,
-        segments=req.segments
+    task_id = str(uuid.uuid4())
+    # Start thread
+    t = threading.Thread(
+        target=run_dub_and_edit_worker,
+        args=(task_id, video_path, req.segments, req.voice_definitions, req.video_options.dict())
     )
-    
-    if not video_success:
-        raise HTTPException(500, "Error rendering final compiled video.")
+    t.daemon = True
+    t.start()
+    return {"success": True, "task_id": task_id}
+
+@app.get("/api/tasks/{task_id}/progress")
+async def task_progress_stream(task_id: str):
+    """SSE endpoint streaming task status and progress to UI EventSource."""
+    if task_id not in jobs:
+        raise HTTPException(404, "Task not found")
         
-    # Clean up temp files
-    try:
-        if os.path.exists(output_audio_path):
-            os.remove(output_audio_path)
-        if os.path.exists(output_srt_path):
-            os.remove(output_srt_path)
-    except Exception as cleanup_error:
-        print(f"[API] Cleanup warning: {cleanup_error}")
-        
-    return {
-        "success": True,
-        "filename": final_video_filename,
-        "video_path": output_video_path,
-        "size_bytes": os.path.getsize(output_video_path),
-        "url": f"/api/preview/{final_video_filename}"
-    }
+    async def event_generator():
+        last_progress = -1
+        last_status = ""
+        while True:
+            job = jobs.get(task_id)
+            if not job:
+                # If deleted
+                data = {"status": "failed", "progress": 100, "error": "Task context lost"}
+                yield f"data: {json.dumps(data)}\n\n"
+                break
+                
+            status = job["status"]
+            progress = job["progress"]
+            message = job["message"]
+            error = job["error"]
+            result = job["result"]
+            
+            # Streaming events only on changes to limit network load
+            if progress != last_progress or status != last_status:
+                last_progress = progress
+                last_status = status
+                data = {
+                    "status": status,
+                    "progress": progress,
+                    "message": message,
+                    "error": error,
+                    "result": result
+                }
+                yield f"data: {json.dumps(data)}\n\n"
+                
+            if status in ["completed", "failed"]:
+                break
+                
+            await asyncio.sleep(0.5)
+            
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 # ----------------- VIDEO PREVIEW STREAMING -----------------
 
