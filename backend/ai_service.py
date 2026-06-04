@@ -174,8 +174,8 @@ Respond ONLY with this JSON array. No markdown formatting, no code blocks, just 
 """
 
         try:
-            # Upload via Gemini Files API
-            uploaded_file = genai.upload_file(path=chunk_file)
+            # Upload via Gemini Files API with explicit MIME type to prevent misidentification on Windows
+            uploaded_file = genai.upload_file(path=chunk_file, mime_type="audio/mp3")
             print(f"-- Uploaded file: {uploaded_file.name}. Waiting for processing...")
             
             while uploaded_file.state.name == "PROCESSING":
