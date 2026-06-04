@@ -82,38 +82,30 @@ def clean_tts_text(text: str) -> str:
     return text
 
 def get_dynamic_speaker_instruct(speaker_id: str, default_gender: str, emotion: str = "neutral") -> str:
-    """Generates a unique OmniVoice prompt dynamically based on the speaker_id and emotion."""
+    """Generates a unique OmniVoice prompt dynamically using only supported keywords."""
     if not speaker_id:
         gender = "male" if default_gender == "male" else "female"
     else:
         speaker_id_clean = speaker_id.lower().strip()
         gender = "male" if "male" in speaker_id_clean else default_gender
 
-    # Default variations based on speaker identity (name/number hash)
     speaker_id_clean = (speaker_id or "").lower().strip()
     match = re.search(r'\d+', speaker_id_clean)
     num = int(match.group()) if match else hash(speaker_id_clean or "default")
     
-    # Variations arrays
     pitches = ["very low", "low", "moderate", "high", "very high"]
     ages = ["teenager", "young adult", "middle-aged"]
     
-    pitch = pitches[num % len(pitches)]
-    age = ages[(num // len(pitches)) % len(ages)]
+    pitch_keyword = f"{pitches[num % len(pitches)]} pitch"
+    age_keyword = ages[(num // len(pitches)) % len(ages)]
     
-    # Emotion instruction mapping
-    emotion_instructs = {
-        "excited": "excited and energetic tone, speaking with enthusiasm",
-        "angry": "angry and harsh tone, speaking with aggression",
-        "whisper": "soft whispering voice, absolute quiet background",
-        "scared": "fearful and trembling tone, speaking with panic",
-        "crying": "sad and crying tone, showing grief",
-        "sad": "sad and low tone, showing sorrow",
-        "neutral": "natural and clear tone"
-    }
-    em_tone = emotion_instructs.get((emotion or "neutral").lower().strip(), "natural and clear tone")
+    instruct_parts = [gender, pitch_keyword, age_keyword]
     
-    return f"{gender}, {pitch} pitch, {age}, {em_tone}"
+    # Only "whisper" is supported as an emotional token keyword in OmniVoice
+    if emotion and emotion.lower().strip() == "whisper":
+        instruct_parts.append("whisper")
+        
+    return ", ".join(instruct_parts)
 
 def generate_voiceover(
     segments: list, 

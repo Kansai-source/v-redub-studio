@@ -46,6 +46,9 @@ class TranscribeRequest(BaseModel):
     gemini_model: Optional[str] = "gemini-3.5-flash"
     gemini_chunk_size: Optional[float] = 900.0
     gemini_api_endpoint: Optional[str] = None
+    target_lang: Optional[str] = "vi"
+    whisper_model: Optional[str] = "base"
+    source_lang: Optional[str] = "auto"
 
 class VideoFilterOptions(BaseModel):
     zoom_level: float = 0.0
@@ -240,6 +243,10 @@ def api_upload_video(file: UploadFile = File(...)):
         except Exception as dur_err:
             print(f"[API] Error getting video duration via ffprobe: {dur_err}")
             
+        # Detect subtitles position
+        from backend.video_service import detect_subtitles_y_axis
+        detection = detect_subtitles_y_axis(video_path)
+            
         return {
             "success": True,
             "file_path": video_path,
@@ -247,7 +254,8 @@ def api_upload_video(file: UploadFile = File(...)):
             "title": file.filename,
             "duration": duration,
             "thumbnail": "",
-            "url": f"/api/preview/{filename}"
+            "url": f"/api/preview/{filename}",
+            "detected_subtitles": detection
         }
     except Exception as e:
         print(f"[API] Error in /api/video/upload: {e}")
@@ -289,6 +297,11 @@ def run_download_worker(task_id: str, url: str):
         
         result["audio_path"] = audio_path if audio_success else None
         
+        # Detect subtitles position
+        from backend.video_service import detect_subtitles_y_axis
+        detection = detect_subtitles_y_axis(video_path)
+        result["detected_subtitles"] = detection
+        
         with jobs_lock:
             jobs[task_id]["status"] = "completed"
             jobs[task_id]["progress"] = 100
@@ -302,7 +315,7 @@ def run_download_worker(task_id: str, url: str):
             jobs[task_id]["message"] = f"Lỗi: {str(e)}"
             jobs[task_id]["error"] = str(e)
 
-def run_transcribe_worker(task_id: str, video_path: str, mode: str, gemini_key: str, gemini_model: str, gemini_chunk_size: float = 900.0, gemini_api_endpoint: Optional[str] = None):
+def run_transcribe_worker(task_id: str, video_path: str, mode: str, gemini_key: str, gemini_model: str, gemini_chunk_size: float = 900.0, gemini_api_endpoint: Optional[str] = None, target_lang: str = "vi", whisper_model: str = "base", source_lang: str = "auto"):
     try:
         with jobs_lock:
             jobs[task_id] = {"status": "processing", "progress": 10, "message": "Kiểm tra tập tin âm thanh...", "result": None, "error": None}
@@ -328,7 +341,10 @@ def run_transcribe_worker(task_id: str, video_path: str, mode: str, gemini_key: 
             gemini_key=gemini_key,
             gemini_model=gemini_model,
             gemini_chunk_size=gemini_chunk_size,
-            gemini_api_endpoint=gemini_api_endpoint
+            gemini_api_endpoint=gemini_api_endpoint,
+            target_lang=target_lang,
+            whisper_model=whisper_model,
+            source_lang=source_lang
         )
         
         if not result.get("success"):
@@ -367,14 +383,24 @@ def run_dub_and_edit_worker(
         final_video_filename = f"final_{filename_no_ext}_{timestamp}.mp4"
         output_video_path = os.path.join(OUTPUTS_DIR, final_video_filename)
         
-        import yt_dlp
         duration = 30.0
         try:
-            with yt_dlp.YoutubeDL({'quiet': True}) as ydl:
-                info = ydl.extract_info(video_path, download=False)
-                duration = info.get('duration', 30.0)
-        except Exception:
-            pass
+            import subprocess
+            import sys
+            cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", video_path]
+            startupinfo = None
+            if sys.platform == "win32":
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                startupinfo.wShowWindow = 0
+            res = subprocess.run(cmd, capture_output=True, text=True, check=True, startupinfo=startupinfo)
+            duration = float(res.stdout.strip())
+            print(f"[Worker] Detected duration: {duration} seconds using ffprobe")
+        except Exception as dur_err:
+            print(f"[Worker] Error getting video duration via ffprobe: {dur_err}")
+            if segments:
+                duration = max(float(seg.get("end", 0.0)) for seg in segments) + 5.0
+                print(f"[Worker] Fallback duration calculated from segments: {duration} seconds")
             
         tts_success = False
         enable_dubbing = video_options.get("enable_dubbing", True)
@@ -469,7 +495,7 @@ def api_transcribe(req: TranscribeRequest):
     # Start thread
     t = threading.Thread(
         target=run_transcribe_worker,
-        args=(task_id, req.file_path, req.mode, req.gemini_key, req.gemini_model, req.gemini_chunk_size, req.gemini_api_endpoint)
+        args=(task_id, req.file_path, req.mode, req.gemini_key, req.gemini_model, req.gemini_chunk_size, req.gemini_api_endpoint, req.target_lang, req.whisper_model, req.source_lang)
     )
     t.daemon = True
     t.start()

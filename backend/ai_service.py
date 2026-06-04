@@ -8,31 +8,57 @@ import torch
 from backend.config import TEMP_DIR
 
 _whisper_model = None
+_whisper_model_name = None
 
-def get_whisper_model():
-    """Lazily loads the local WhisperModel to save memory/VRAM."""
-    global _whisper_model
-    if _whisper_model is not None:
+def get_whisper_model(model_name: str = "base"):
+    """Lazily loads or reloads the local WhisperModel with specified model size."""
+    global _whisper_model, _whisper_model_name
+    if _whisper_model is not None and _whisper_model_name == model_name:
         return _whisper_model
         
-    print("[AI Service] Loading local Whisper model...")
+    print(f"[AI Service] Loading local Whisper model '{model_name}'...")
     try:
         from faster_whisper import WhisperModel
         device = "cuda" if torch.cuda.is_available() else "cpu"
         compute_type = "float16" if torch.cuda.is_available() else "int8"
-        _whisper_model = WhisperModel("base", device=device, compute_type=compute_type)
-        print(f"[AI Service] Local Whisper base model initialized on device: {device}")
+        _whisper_model = WhisperModel(model_name, device=device, compute_type=compute_type)
+        _whisper_model_name = model_name
+        print(f"[AI Service] Local Whisper '{model_name}' model initialized on device: {device}")
         return _whisper_model
     except Exception as e:
         print(f"[AI Service] Error loading local Whisper model: {e}")
         return None
 
-def translate_to_vietnamese(text: str) -> str:
-    """Translates text to Vietnamese using the free public Google Translate API."""
+def split_long_segment(seg_text: str, start: float, end: float) -> list:
+    """Splits large segments into shorter segments proportionally by word count/length."""
+    words = seg_text.split()
+    if len(words) <= 12:
+        return [{"text": seg_text, "start": start, "end": end}]
+        
+    chunks = []
+    chunk_size = 10
+    total_words = len(words)
+    duration = end - start
+    
+    for i in range(0, total_words, chunk_size):
+        chunk_words = words[i:i+chunk_size]
+        chunk_text = " ".join(chunk_words)
+        
+        c_start = start + (i / total_words) * duration
+        c_end = start + (min(i + chunk_size, total_words) / total_words) * duration
+        chunks.append({
+            "text": chunk_text,
+            "start": round(c_start, 2),
+            "end": round(c_end, 2)
+        })
+    return chunks
+
+def translate_text(text: str, target_lang: str = "vi") -> str:
+    """Translates text to target language using the free public Google Translate API."""
     if not text.strip():
         return ""
     try:
-        url = "https://translate.googleapis.com/translate_a/single?client=gtx&dt=t&sl=auto&tl=vi&q=" + urllib.parse.quote(text)
+        url = f"https://translate.googleapis.com/translate_a/single?client=gtx&dt=t&sl=auto&tl={target_lang}&q=" + urllib.parse.quote(text)
         req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
         with urllib.request.urlopen(req, timeout=5) as response:
             data = json.loads(response.read().decode('utf-8'))
@@ -121,7 +147,9 @@ def transcribe_with_gemini(
     gemini_key: str,
     gemini_model: str = "gemini-3.5-flash",
     gemini_chunk_size: float = 900.0,
-    gemini_api_endpoint: Optional[str] = None
+    gemini_api_endpoint: Optional[str] = None,
+    target_lang: str = "vi",
+    source_lang: str = "auto"
 ) -> dict:
     """Uses Google Gemini API to split audio context, transcribe, translate, and assign speaker values."""
     if not gemini_key:
@@ -141,10 +169,10 @@ def transcribe_with_gemini(
     else:
         genai.configure(api_key=gemini_key)
     
-    # For custom proxy endpoints, cap the chunk size to 300 seconds (5 minutes) to prevent "413 Payload Too Large" and "524 Timeout" errors
+    # For custom proxy endpoints, cap the chunk size to 120 seconds (2 minutes) to prevent "413 Payload Too Large" and "524 Timeout" errors
     effective_chunk_size = gemini_chunk_size
     if gemini_api_endpoint:
-        effective_chunk_size = min(gemini_chunk_size, 300.0)
+        effective_chunk_size = min(gemini_chunk_size, 120.0)
         print(f"[AI Service] Custom endpoint active, using effective chunk size: {effective_chunk_size}s")
 
     # 1. Split audio track into smaller segments
@@ -163,8 +191,31 @@ def transcribe_with_gemini(
             for spk_id, desc in global_speaker_profiles.items():
                 profiles_context += f"- {spk_id}: {desc}\n"
                 
+        lang_names = {
+            "vi": "Vietnamese",
+            "en": "English",
+            "ko": "Korean",
+            "zh": "Chinese",
+            "ja": "Japanese"
+        }
+        target_lang_name = lang_names.get(target_lang, "Vietnamese")
+        
+        source_context = ""
+        if source_lang and source_lang != "auto":
+            lang_names_full = {
+                "zh": "Chinese",
+                "en": "English",
+                "ko": "Korean",
+                "ja": "Japanese"
+            }
+            source_context = f"\nThe original spoken language of the audio is {lang_names_full.get(source_lang, source_lang)}."
+
         prompt = f"""
-Analyze this audio segment. You must output a JSON list of dialogue segments with timestamps, original spoken text, and exact Vietnamese translation. 
+Analyze this audio segment. You must output a JSON list of dialogue segments with timestamps, original spoken text, and exact {target_lang_name} translation. 
+{source_context}
+
+CRITICAL REQUIREMENT: You must split the transcription into short, natural dialogue segments. Each segment should contain only 1 or 2 small clauses (typically between 3 to 12 words, or representing a single short sentence/phrase). Do NOT group multiple independent sentences or long paragraphs into a single segment; split them into consecutive segments matching their exact start/end times.
+
 Also, classify the gender of the speaker for each segment as male or female based on the speaker voice sound.
 In addition, differentiate between distinct speakers in the audio. Assign a unique "speaker_id" to each segment representing who is speaking.
 {profiles_context}
@@ -178,7 +229,7 @@ Format the output strictly as a JSON array of objects, with these fields:
     "start": 0.00,
     "end": 2.50,
     "original_text": "text in original language",
-    "text": "Vietnamese translation text",
+    "text": "{target_lang_name} translation text",
     "gender": "male" or "female",
     "speaker_id": "male_1",
     "vocal_description": "short description of voice quality and conversation role",
@@ -264,25 +315,32 @@ def transcribe_and_translate(
     gemini_key: str = None,
     gemini_model: str = "gemini-3.5-flash",
     gemini_chunk_size: float = 900.0,
-    gemini_api_endpoint: Optional[str] = None
+    gemini_api_endpoint: Optional[str] = None,
+    target_lang: str = "vi",
+    whisper_model: str = "base",
+    source_lang: str = "auto"
 ) -> dict:
     """Coordinates transcription and translation depending on chosen mode: Local or Gemini API."""
     if mode == "gemini":
-        return transcribe_with_gemini(audio_path, gemini_key, gemini_model, gemini_chunk_size, gemini_api_endpoint)
+        return transcribe_with_gemini(audio_path, gemini_key, gemini_model, gemini_chunk_size, gemini_api_endpoint, target_lang, source_lang)
         
     # Local mode (default faster-whisper + Google Translate API)
-    model = get_whisper_model()
+    model = get_whisper_model(whisper_model)
     if not model:
         return {
             "success": False,
-            "error": "Local Whisper could not be initialized. Check torch or Python libraries."
+            "error": f"Local Whisper model '{whisper_model}' could not be initialized."
         }
         
     try:
-        print("[AI Service] Transcribing audio with local Whisper model...")
-        segments_generator, info = model.transcribe(audio_path, beam_size=5)
+        print(f"[AI Service] Transcribing audio with local Whisper model '{whisper_model}' (source_lang: {source_lang})...")
+        transcribe_kwargs = {"beam_size": 5}
+        if source_lang and source_lang != "auto":
+            transcribe_kwargs["language"] = source_lang
+            
+        segments_generator, info = model.transcribe(audio_path, **transcribe_kwargs)
         raw_segments = list(segments_generator)
-        print(f"[AI Service] Transcription complete. Transcribed {len(raw_segments)} segments.")
+        print(f"[AI Service] Transcription complete. Transcribed {len(raw_segments)} raw segments.")
         
         translated_segments = []
         for idx, seg in enumerate(raw_segments):
@@ -290,19 +348,24 @@ def transcribe_and_translate(
             if not orig_text:
                 continue
                 
-            vietnamese_text = translate_to_vietnamese(orig_text)
-            gender = guess_gender(vietnamese_text)
+            # Perform local segment splitting for overly long segments
+            divided_segments = split_long_segment(orig_text, float(seg.start), float(seg.end))
             
-            translated_segments.append({
-                "id": idx,
-                "start": float(seg.start),
-                "end": float(seg.end),
-                "original_text": orig_text,
-                "text": vietnamese_text,
-                "gender": gender,
-                "speaker_id": f"{gender}_1",
-                "emotion": "neutral"
-            })
+            for chunk in divided_segments:
+                chunk_text = chunk["text"]
+                translated_text = translate_text(chunk_text, target_lang=target_lang)
+                gender = guess_gender(translated_text)
+                
+                translated_segments.append({
+                    "id": len(translated_segments),
+                    "start": chunk["start"],
+                    "end": chunk["end"],
+                    "original_text": chunk_text,
+                    "text": translated_text,
+                    "gender": gender,
+                    "speaker_id": f"{gender}_1",
+                    "emotion": "neutral"
+                })
             
         return {
             "success": True,
@@ -325,8 +388,20 @@ def save_segments_to_srt(segments: list, output_srt_path: str) -> None:
         ms = int(round((seconds - int(seconds)) * 1000))
         return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
+    def wrap_text_smart(text: str, max_chars: int = 40) -> str:
+        text = text.strip()
+        if len(text) <= max_chars or "\n" in text or "\\n" in text or "\\N" in text:
+            return text
+        spaces = [i for i, char in enumerate(text) if char == ' ']
+        if not spaces:
+            return text
+        mid = len(text) / 2.0
+        best_space = min(spaces, key=lambda x: abs(x - mid))
+        return text[:best_space] + "\n" + text[best_space+1:]
+
     with open(output_srt_path, "w", encoding="utf-8") as f:
         for idx, seg in enumerate(segments):
             f.write(f"{idx + 1}\n")
             f.write(f"{format_time(seg['start'])} --> {format_time(seg['end'])}\n")
-            f.write(f"{seg['text']}\n\n")
+            wrapped = wrap_text_smart(seg.get('text', ''))
+            f.write(f"{wrapped}\n\n")
