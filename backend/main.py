@@ -44,6 +44,7 @@ class TranscribeRequest(BaseModel):
     mode: str = "local"
     gemini_key: Optional[str] = None
     gemini_model: Optional[str] = "gemini-3.5-flash"
+    gemini_chunk_size: Optional[float] = 300.0
 
 class VideoFilterOptions(BaseModel):
     zoom_level: float = 0.0
@@ -300,7 +301,7 @@ def run_download_worker(task_id: str, url: str):
             jobs[task_id]["message"] = f"Lỗi: {str(e)}"
             jobs[task_id]["error"] = str(e)
 
-def run_transcribe_worker(task_id: str, video_path: str, mode: str, gemini_key: str, gemini_model: str):
+def run_transcribe_worker(task_id: str, video_path: str, mode: str, gemini_key: str, gemini_model: str, gemini_chunk_size: float = 300.0):
     try:
         with jobs_lock:
             jobs[task_id] = {"status": "processing", "progress": 10, "message": "Kiểm tra tập tin âm thanh...", "result": None, "error": None}
@@ -324,7 +325,8 @@ def run_transcribe_worker(task_id: str, video_path: str, mode: str, gemini_key: 
             audio_path=audio_path,
             mode=mode,
             gemini_key=gemini_key,
-            gemini_model=gemini_model
+            gemini_model=gemini_model,
+            gemini_chunk_size=gemini_chunk_size
         )
         
         if not result.get("success"):
@@ -465,7 +467,7 @@ def api_transcribe(req: TranscribeRequest):
     # Start thread
     t = threading.Thread(
         target=run_transcribe_worker,
-        args=(task_id, req.file_path, req.mode, req.gemini_key, req.gemini_model)
+        args=(task_id, req.file_path, req.mode, req.gemini_key, req.gemini_model, req.gemini_chunk_size)
     )
     t.daemon = True
     t.start()

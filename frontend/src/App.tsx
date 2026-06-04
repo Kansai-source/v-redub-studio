@@ -66,6 +66,7 @@ export default function App() {
   const [geminiKey, setGeminiKey] = useState(() => localStorage.getItem("gemini_api_key") || "");
   const [geminiModel, setGeminiModel] = useState("gemini-3.5-flash");
   const [customModel, setCustomModel] = useState("gemini-3.1-pro");
+  const [geminiChunkSize, setGeminiChunkSize] = useState<number>(300);
   
   // States
   const [isDownloading, setIsDownloading] = useState(false);
@@ -653,7 +654,7 @@ export default function App() {
       addLog("Đang tiến hành dịch hội thoại sang tiếng Việt (miễn phí)...", "info");
     } else {
       const activeModel = geminiModel === "custom" ? customModel : geminiModel;
-      addLog(`Khởi chạy phân tích Gemini API (${activeModel}). Hệ thống tự động cắt âm thanh thành đoạn 15 phút...`, "info");
+      addLog(`Khởi chạy phân tích Gemini API (${activeModel}). Hệ thống tự động cắt âm thanh thành đoạn ${geminiChunkSize / 60} phút...`, "info");
       addLog("Đang gửi và xử lý dữ liệu qua Gemini API...", "info");
     }
     
@@ -665,7 +666,8 @@ export default function App() {
           file_path: downloadInfo.file_path,
           mode: transcribeMode,
           gemini_key: transcribeMode === "gemini" ? geminiKey : undefined,
-          gemini_model: transcribeMode === "gemini" ? (geminiModel === "custom" ? customModel : geminiModel) : undefined
+          gemini_model: transcribeMode === "gemini" ? (geminiModel === "custom" ? customModel : geminiModel) : undefined,
+          gemini_chunk_size: transcribeMode === "gemini" ? geminiChunkSize : undefined
         })
       });
       
@@ -1584,6 +1586,19 @@ export default function App() {
                           />
                         </div>
                       )}
+                      
+                      <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
+                        <span style={{ fontSize: "11px", color: "var(--text-muted)", fontWeight: "600" }}>ĐỘ DÀI PHÂN ĐOẠN (CHUNKS):</span>
+                        <select 
+                          value={geminiChunkSize} 
+                          onChange={(e) => setGeminiChunkSize(parseInt(e.target.value))}
+                          style={{ padding: "6px 10px", fontSize: "13px", height: "32px", borderRadius: "4px", backgroundColor: "rgba(0,0,0,0.2)", border: "1px solid rgba(255,255,255,0.1)", color: "#fff" }}
+                        >
+                          <option value="300">5 phút / phân đoạn (Khuyên dùng, Nhanh)</option>
+                          <option value="600">10 phút / phân đoạn (Cân bằng)</option>
+                          <option value="900">15 phút / phân đoạn (Tiết kiệm Quota RPD)</option>
+                        </select>
+                      </div>
                     </>
                   )}
                 </div>
