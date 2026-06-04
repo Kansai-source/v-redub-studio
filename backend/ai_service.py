@@ -190,7 +190,7 @@ Respond ONLY with this JSON array. No markdown formatting, no code blocks, just 
             response = model.generate_content(
                 [prompt, uploaded_file],
                 generation_config={"response_mime_type": "application/json"},
-                request_options={"timeout": 120.0}
+                request_options={"timeout": 360.0}
             )
             
             # Clean up temp file from GCS
