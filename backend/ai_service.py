@@ -81,7 +81,7 @@ def split_audio_into_chunks(audio_path: str, chunk_length_sec: float = 300.0) ->
             "ffmpeg", "-y",
             "-i", audio_path,
             "-acodec", "libmp3lame",
-            "-b:a", "64k",
+            "-b:a", "24k",
             "-ac", "1",
             compressed_path
         ]
@@ -103,7 +103,7 @@ def split_audio_into_chunks(audio_path: str, chunk_length_sec: float = 300.0) ->
             "-t", str(chunk_length_sec),
             "-i", audio_path,
             "-acodec", "libmp3lame",
-            "-b:a", "64k",
+            "-b:a", "24k",
             "-ac", "1",
             chunk_file
         ]
@@ -136,10 +136,19 @@ def transcribe_with_gemini(
         clean_endpoint = gemini_api_endpoint.replace("https://", "").replace("http://", "").rstrip("/")
         client_options['api_endpoint'] = clean_endpoint
         
-    genai.configure(api_key=gemini_key, client_options=client_options if client_options else None)
+    if client_options:
+        genai.configure(api_key=gemini_key, client_options=client_options, transport="rest")
+    else:
+        genai.configure(api_key=gemini_key)
     
+    # For custom proxy endpoints, cap the chunk size to 600 seconds (10 minutes) to prevent "413 Payload Too Large" error
+    effective_chunk_size = gemini_chunk_size
+    if gemini_api_endpoint:
+        effective_chunk_size = min(gemini_chunk_size, 600.0)
+        print(f"[AI Service] Custom endpoint active, using effective chunk size: {effective_chunk_size}s")
+
     # 1. Split audio track into smaller segments
-    chunks = split_audio_into_chunks(audio_path, chunk_length_sec=gemini_chunk_size)
+    chunks = split_audio_into_chunks(audio_path, chunk_length_sec=effective_chunk_size)
     global_segments = []
     seg_counter = 0
     global_speaker_profiles = {}  # maps speaker_id -> short vocal description & role
@@ -181,30 +190,24 @@ Respond ONLY with this JSON array. No markdown formatting, no code blocks, just 
 """
 
         try:
-            # Upload via Gemini Files API with explicit MIME type to prevent misidentification on Windows
-            uploaded_file = genai.upload_file(path=chunk_file, mime_type="audio/mp3")
-            print(f"-- Uploaded file: {uploaded_file.name}. Waiting for processing...")
-            
-            while uploaded_file.state.name == "PROCESSING":
-                time.sleep(1)
-                uploaded_file = genai.get_file(uploaded_file.name)
-                
-            if uploaded_file.state.name == "FAILED":
-                raise Exception("Gemini uploading processing failed.")
-                
-            print(f"-- File status: READY. Sending generation request...")
+            # Read local audio chunk data to send inline
+            print(f"-- Reading audio file: {chunk_file} ...")
+            with open(chunk_file, "rb") as f:
+                audio_data = f.read()
+
+            print(f"-- Sending generation request with inline audio...")
             model = genai.GenerativeModel(gemini_model)
             response = model.generate_content(
-                [prompt, uploaded_file],
+                [
+                    prompt,
+                    {
+                        "mime_type": "audio/mp3",
+                        "data": audio_data
+                    }
+                ],
                 generation_config={"response_mime_type": "application/json"},
                 request_options={"timeout": 360.0}
             )
-            
-            # Clean up temp file from GCS
-            try:
-                genai.delete_file(uploaded_file.name)
-            except Exception as e_del:
-                print(f"[AI Service] warning deleting cloud file: {e_del}")
                 
             content = response.text.strip()
             
