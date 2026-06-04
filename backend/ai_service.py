@@ -57,7 +57,7 @@ def guess_gender(vietnamese_text: str) -> str:
             
     return "female" # Default
 
-def split_audio_into_chunks(audio_path: str, chunk_length_sec: float = 900.0) -> list:
+def split_audio_into_chunks(audio_path: str, chunk_length_sec: float = 300.0) -> list:
     """Splits audio track into smaller chunks using FFmpeg.
     Uses target libmp3lame compression to reduce audio file upload sizes down to 5%.
     """
@@ -130,8 +130,8 @@ def transcribe_with_gemini(
     
     genai.configure(api_key=gemini_key)
     
-    # 1. Split audio track into smaller 15-minute segments
-    chunks = split_audio_into_chunks(audio_path, chunk_length_sec=900.0)
+    # 1. Split audio track into smaller 5-minute segments
+    chunks = split_audio_into_chunks(audio_path, chunk_length_sec=300.0)
     global_segments = []
     seg_counter = 0
     global_speaker_profiles = {}  # maps speaker_id -> short vocal description & role
@@ -188,7 +188,8 @@ Respond ONLY with this JSON array. No markdown formatting, no code blocks, just 
             model = genai.GenerativeModel(gemini_model)
             response = model.generate_content(
                 [prompt, uploaded_file],
-                generation_config={"response_mime_type": "application/json"}
+                generation_config={"response_mime_type": "application/json"},
+                request_options={"timeout": 120.0}
             )
             
             # Clean up temp file from GCS
