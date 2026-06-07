@@ -108,6 +108,13 @@ if %errorlevel% neq 0 (
 )
 
 echo [+] Dang cai dat requirements (Co the mat 1-2 phut)...
+nvidia-smi >nul 2>&1
+if %errorlevel% equ 0 (
+    echo [+] Phat hien GPU NVIDIA tren he thong. Dang uu tien cai dat PyTorch phien ban CUDA 12.4...
+    pip install torch --index-url https://download.pytorch.org/whl/cu124
+) else (
+    echo [-] Khong tim thay GPU NVIDIA hoac GPU driver. Cai dat PyTorch phien ban CPU thong thuong...
+)
 pip install -r requirements.txt
 if %errorlevel% neq 0 (
     echo [ERROR] Cai dat cac thu vien Python that bai.

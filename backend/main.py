@@ -74,6 +74,9 @@ class VideoFilterOptions(BaseModel):
     subtitle_margin_v: int = 20
     rotate_angle: float = 0.0
     enable_dynamic_pan: bool = False
+    clean_watermark: bool = False
+    watermark_crop_pct: float = 15.0
+    enable_subtitles: bool = True
 
 class DubAndEditRequest(BaseModel):
     video_path: str
@@ -426,7 +429,8 @@ def run_dub_and_edit_worker(
         save_segments_to_srt(segments, output_srt_path)
         
         options_dict = dict(video_options)
-        options_dict["srt_path"] = output_srt_path
+        if video_options.get("enable_subtitles", True):
+            options_dict["srt_path"] = output_srt_path
         if tts_success and os.path.exists(output_audio_path):
             options_dict["tts_audio_path"] = output_audio_path
             

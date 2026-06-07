@@ -124,6 +124,7 @@ export default function App() {
   const [sourceLang, setSourceLang] = useState<string>("auto");
   const [aspectRatioMode, setAspectRatioMode] = useState<string>("original"); // original, crop_9_16, blur_9_16
   const [subMarginV, setSubMarginV] = useState<number>(20); // vertical margin for burned subtitles
+  const [enableSubtitles, setEnableSubtitles] = useState<boolean>(true);
 
   // Voice Upload States
   const [uploadVoiceName, setUploadVoiceName] = useState<string>("");
@@ -453,7 +454,8 @@ export default function App() {
         enableDubbing,
         videoSpeed,
         aspectRatioMode,
-        subMarginV
+        subMarginV,
+        enableSubtitles
       }
     };
     localStorage.setItem("vredub_draft_v1", JSON.stringify(draft));
@@ -485,7 +487,8 @@ export default function App() {
     enableDubbing,
     videoSpeed,
     aspectRatioMode,
-    subMarginV
+    subMarginV,
+    enableSubtitles
   ]);
 
   const handleRestoreDraft = () => {
@@ -526,6 +529,7 @@ export default function App() {
       if (opt.videoSpeed !== undefined) setVideoSpeed(opt.videoSpeed);
       if (opt.aspectRatioMode !== undefined) setAspectRatioMode(opt.aspectRatioMode);
       if (opt.subMarginV !== undefined) setSubMarginV(opt.subMarginV);
+      if (opt.enableSubtitles !== undefined) setEnableSubtitles(opt.enableSubtitles);
 
       addLog("Khôi phục bản nháp tiến trình thành công!", "success");
       setHasDraft(false);
@@ -774,8 +778,9 @@ export default function App() {
 
   // 3. Phối trộn Edit & Dub Video
   const handleDubAndEdit = async () => {
-    if (!downloadInfo || segments.length === 0) {
-      alert("Vui lòng tải video và dịch phụ đề trước!");
+    const needsTranscription = enableDubbing || enableSubtitles;
+    if (!downloadInfo || (needsTranscription && segments.length === 0)) {
+      alert("Vui lòng tải video và thực hiện dịch phụ đề / lồng tiếng trước!");
       return;
     }
 
@@ -821,7 +826,8 @@ export default function App() {
         rotate_angle: rotateAngle,
         enable_dynamic_pan: enableDynamicPan,
         clean_watermark: cleanWatermark,
-        watermark_crop_pct: watermarkCropPct
+        watermark_crop_pct: watermarkCropPct,
+        enable_subtitles: enableSubtitles
       }
     };
 
@@ -1042,7 +1048,13 @@ export default function App() {
                   max="25"
                   step="1"
                   value={zoomLevel}
-                  onChange={(e) => setZoomLevel(parseInt(e.target.value))}
+                  onChange={(e) => {
+                    const val = parseInt(e.target.value);
+                    setZoomLevel(val);
+                    if (val > 0) {
+                      setCleanWatermark(false);
+                    }
+                  }}
                 />
               </div>
 
@@ -1121,6 +1133,19 @@ export default function App() {
                 </label>
               </div>
 
+              {/* Subtitle toggle */}
+              <div className="toggle-row">
+                <span style={{ fontSize: "14px" }}>Ghép phụ đề vào video:</span>
+                <label className="switch">
+                  <input
+                    type="checkbox"
+                    checked={enableSubtitles}
+                    onChange={(e) => setEnableSubtitles(e.target.checked)}
+                  />
+                  <span className="slider-switch"></span>
+                </label>
+              </div>
+
               {/* Video Speed Slider */}
               <div className="slider-group" style={{ marginTop: "12px", borderTop: "1px solid rgba(255, 255, 255, 0.05)", paddingTop: "12px" }}>
                 <div className="slider-label-row">
@@ -1169,25 +1194,19 @@ export default function App() {
                   />
                 </div>
 
-                <div className="toggle-row">
-                  <span style={{ fontSize: "13px" }}>Lắc camera chuyển động (Dynamic Pan):</span>
-                  <label className="switch">
-                    <input
-                      type="checkbox"
-                      checked={enableDynamicPan}
-                      onChange={(e) => setEnableDynamicPan(e.target.checked)}
-                    />
-                    <span className="slider-switch"></span>
-                  </label>
-                </div>
-
                 <div className="toggle-row" style={{ marginTop: "10px", borderTop: "1px dashed rgba(255,255,255,0.05)", paddingTop: "10px" }}>
                   <span style={{ fontSize: "13px" }}>Cắt & Bù mờ watermark đỉnh đầu:</span>
                   <label className="switch">
                     <input
                       type="checkbox"
                       checked={cleanWatermark}
-                      onChange={(e) => setCleanWatermark(e.target.checked)}
+                      onChange={(e) => {
+                        const checked = e.target.checked;
+                        setCleanWatermark(checked);
+                        if (checked) {
+                          setZoomLevel(0);
+                        }
+                      }}
                     />
                     <span className="slider-switch"></span>
                   </label>
@@ -2019,7 +2038,7 @@ export default function App() {
             <button
               className="btn-primary"
               onClick={handleDubAndEdit}
-              disabled={isDubbing || !downloadInfo || segments.length === 0}
+              disabled={isDubbing || !downloadInfo || ((enableDubbing || enableSubtitles) && segments.length === 0)}
               style={{ width: "100%", padding: "14px 20px" }}
             >
               {isDubbing ? (

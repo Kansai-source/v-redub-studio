@@ -135,17 +135,18 @@ def process_video_effects(
         crop_h_expr = f"ih*{watermark_crop_pct/100:.4f}"
         if zoom_align == "top": # Căn trên (Shave bottom) -> Cắt watermark dưới, chèn mờ đáy
             wm_filter = (
-                f"split[orig][bg];"
-                f"[bg]boxblur=30:10[bg_blurred];"
-                f"[orig]crop=iw:ih-{crop_h_expr}:0:0[fg];"
-                f"[bg_blurred][fg]overlay=0:0"
+                f"split[orig_wm][bg_wm];"
+                f"[bg_wm]boxblur=30:10[bg_wm_blurred];"
+                f"[orig_wm]crop=iw:ih-{crop_h_expr}:0:0[fg_wm];"
+                f"[bg_wm_blurred][fg_wm]overlay=0:0"
             )
         else: # Căn dưới (Shave top)/Chính giữa -> Cắt watermark trên, chèn mờ đỉnh
+            overlay_y_expr = f"H*{watermark_crop_pct/100:.4f}"
             wm_filter = (
-                f"split[orig][bg];"
-                f"[bg]boxblur=30:10[bg_blurred];"
-                f"[orig]crop=iw:ih-{crop_h_expr}:0:{crop_h_expr}[fg];"
-                f"[bg_blurred][fg]overlay=0:{crop_h_expr}"
+                f"split[orig_wm][bg_wm];"
+                f"[bg_wm]boxblur=30:10[bg_wm_blurred];"
+                f"[orig_wm]crop=iw:ih-{crop_h_expr}:0:{crop_h_expr}[fg_wm];"
+                f"[bg_wm_blurred][fg_wm]overlay=0:{overlay_y_expr}"
             )
         vf_list.append(wm_filter)
 
@@ -157,8 +158,8 @@ def process_video_effects(
         vf_list.append(f"rotate={rotate_angle}*PI/180:ow=rotw({rotate_angle}*PI/180):oh=roth({rotate_angle}*PI/180)")
         vf_list.append("crop=iw*0.96:ih*0.96")
 
-    # Anti-copyright: Dynamic Panning (Handheld Camera effect)
-    enable_dynamic_pan = bool(options.get("enable_dynamic_pan", False))
+    # Anti-copyright: Dynamic Panning (Handheld Camera effect) - Completely Disabled
+    enable_dynamic_pan = False
     if enable_dynamic_pan:
         # Crop 90% and continuously pan the offset using sinusoidal function of time
         vf_list.append("crop=iw*0.92:ih*0.92:(in_w-out_w)/2+(in_w-out_w)/2*sin(t*1.2):(in_h-out_h)/2+(in_h-out_h)/2*cos(t*0.9)")
@@ -186,10 +187,10 @@ def process_video_effects(
                 fg_crop = f"crop=iw*{fg_factor}:ih*{fg_factor},"
             
         blur_filter = (
-            f"split[orig][bg];"
-            f"[bg]scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,boxblur=20:10[bg_blurred];"
-            f"[orig]{fg_crop}scale=720:-1[fg];"
-            f"[bg_blurred][fg]overlay=(W-w)/2:(H-h)/2"
+            f"split[orig_as][bg_as];"
+            f"[bg_as]scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,boxblur=20:10[bg_as_blurred];"
+            f"[orig_as]{fg_crop}scale=720:-1[fg_as];"
+            f"[bg_as_blurred][fg_as]overlay=(W-w)/2:(H-h)/2"
         )
         vf_list.append(blur_filter)
     elif aspect_ratio_mode == "black_9_16":
@@ -204,10 +205,10 @@ def process_video_effects(
                 fg_crop = f"crop=iw*{fg_factor}:ih*{fg_factor},"
             
         black_filter = (
-            f"split[orig][bg_dummy];"
-            f"color=c=black:s=720x1280[bg];"
-            f"[orig]{fg_crop}scale=720:-1[fg];"
-            f"[bg][fg]overlay=(W-w)/2:(H-h)/2"
+            f"split[orig_as][bg_as_dummy];"
+            f"color=c=black:s=720x1280[bg_as];"
+            f"[orig_as]{fg_crop}scale=720:-1[fg_as];"
+            f"[bg_as][fg_as]overlay=(W-w)/2:(H-h)/2"
         )
         vf_list.append(black_filter)
     else:
@@ -316,8 +317,8 @@ def process_video_effects(
         back_color = "&H80000000"  # 50% opacity black shadow
         shadow_val = 1.0  # Thin premium shadow
         
-        # Font size is medium and not too big (13 in 288-pixel baseline ~= 33px in 720p base)
-        font_size = 13
+        # Font size is medium and not too big (10 in 288-pixel baseline ~= 25px in 720p base)
+        font_size = 10
         
         # Calculate remaining space below original subtitle Y range
         ref_height = 720.0
@@ -391,13 +392,15 @@ def process_video_effects(
         print("[FFmpeg] Nvidia hardware acceleration active (h264_nvenc).")
         args += [
             "-c:v", "h264_nvenc",
-            "-preset", "fast"
+            "-preset", "fast",
+            "-rc", "constqp",
+            "-qp", "20"
         ]
     else:
         args += [
             "-c:v", "libx264",
             "-preset", "fast",
-            "-crf", "22"
+            "-crf", "18"
         ]
 
     args += [
@@ -412,11 +415,20 @@ def process_video_effects(
     if not success and _has_nvenc:
         print("[FFmpeg Warning] NVENC encoding failed. Retrying with CPU encoder (libx264)...")
         fallback_args = [x if x != "h264_nvenc" else "libx264" for x in args]
+        
+        # Clean up NVENC-specific quality settings of -rc and -qp
+        if "-rc" in fallback_args:
+            rc_idx = fallback_args.index("-rc")
+            del fallback_args[rc_idx:rc_idx+2]
+        if "-qp" in fallback_args:
+            qp_idx = fallback_args.index("-qp")
+            del fallback_args[qp_idx:qp_idx+2]
+            
         if "-crf" not in fallback_args:
-            # Insert -crf 22 right before the output video path
+            # Insert -crf 18 right before the output video path
             output_idx = len(fallback_args) - 1
             fallback_args.insert(output_idx, "-crf")
-            fallback_args.insert(output_idx + 1, "22")
+            fallback_args.insert(output_idx + 1, "18")
         success = run_ffmpeg_cmd(fallback_args, cwd=str(TEMP_DIR))
         
     # Clean up temp SRT if copied
