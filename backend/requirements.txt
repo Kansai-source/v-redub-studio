@@ -10,5 +10,7 @@ soundfile
 torch
 omnivoice
 google-generativeai
+opencv-python
+
 
 
