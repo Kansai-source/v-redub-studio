@@ -76,6 +76,8 @@ class VideoFilterOptions(BaseModel):
     enable_dynamic_pan: bool = False
     clean_watermark: bool = False
     watermark_crop_pct: float = 15.0
+    watermark_cover_type: str = "blur"
+    watermark_cover_path: Optional[str] = None
     enable_subtitles: bool = True
 
 class DubAndEditRequest(BaseModel):
@@ -210,6 +212,33 @@ def designer_save(req: DesignerSaveRequest):
         raise he
     except Exception as e:
         print(f"[API] Error in /api/designer/save: {e}")
+        raise HTTPException(500, str(e))
+
+@app.post("/api/watermark/upload-cover")
+def api_upload_watermark_cover(file: UploadFile = File(...)):
+    """Handles uploading of local image/video files for watermark cover banner."""
+    try:
+        import uuid
+        import shutil
+        from backend.config import DOWNLOADS_DIR
+        
+        file_id = str(uuid.uuid4())[:8]
+        ext = os.path.splitext(file.filename)[1] or ".png"
+        filename = f"cover_{file_id}{ext}"
+        cover_path = os.path.join(DOWNLOADS_DIR, filename)
+        
+        os.makedirs(DOWNLOADS_DIR, exist_ok=True)
+        with open(cover_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+            
+        print(f"[API] Watermark cover uploaded successfully to: {cover_path}")
+        return {
+            "success": True,
+            "filename": filename,
+            "file_path": cover_path
+        }
+    except Exception as e:
+        print(f"[API] Error in /api/watermark/upload-cover: {e}")
         raise HTTPException(500, str(e))
 
 @app.post("/api/video/upload")

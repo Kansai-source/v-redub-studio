@@ -103,6 +103,9 @@ export default function App() {
   const [coverSub, setCoverSub] = useState<boolean>(false);
   const [cleanWatermark, setCleanWatermark] = useState<boolean>(false);
   const [watermarkCropPct, setWatermarkCropPct] = useState<number>(15);
+  const [watermarkCoverType, setWatermarkCoverType] = useState<string>("blur");
+  const [watermarkCoverPath, setWatermarkCoverPath] = useState<string>("");
+  const [isUploadingCover, setIsUploadingCover] = useState<boolean>(false);
   const [coverColor, setCoverColor] = useState<string>("gold");
   const [coverHOffset, setCoverHOffset] = useState<number>(65); // Height in pixels
   const [coverYPos, setCoverYPos] = useState<number>(0.82); // 82% from top
@@ -440,6 +443,10 @@ export default function App() {
         hflip,
         rotateAngle,
         enableDynamicPan,
+        cleanWatermark,
+        watermarkCropPct,
+        watermarkCoverType,
+        watermarkCoverPath,
         coverSub,
         coverColor,
         coverHOffset,
@@ -473,6 +480,10 @@ export default function App() {
     hflip,
     rotateAngle,
     enableDynamicPan,
+    cleanWatermark,
+    watermarkCropPct,
+    watermarkCoverType,
+    watermarkCoverPath,
     coverSub,
     coverColor,
     coverHOffset,
@@ -519,6 +530,10 @@ export default function App() {
       if (opt.coverWPct !== undefined) setCoverWPct(opt.coverWPct);
       if (opt.coverXPct !== undefined) setCoverXPct(opt.coverXPct);
       if (opt.coverAutoFit !== undefined) setCoverAutoFit(opt.coverAutoFit);
+      if (opt.cleanWatermark !== undefined) setCleanWatermark(opt.cleanWatermark);
+      if (opt.watermarkCropPct !== undefined) setWatermarkCropPct(opt.watermarkCropPct);
+      if (opt.watermarkCoverType !== undefined) setWatermarkCoverType(opt.watermarkCoverType);
+      if (opt.watermarkCoverPath !== undefined) setWatermarkCoverPath(opt.watermarkCoverPath);
 
       if (opt.originalVol !== undefined) setOriginalVol(opt.originalVol);
       if (opt.ttsVol !== undefined) setTtsVol(opt.ttsVol);
@@ -827,6 +842,8 @@ export default function App() {
         enable_dynamic_pan: enableDynamicPan,
         clean_watermark: cleanWatermark,
         watermark_crop_pct: watermarkCropPct,
+        watermark_cover_type: watermarkCoverType,
+        watermark_cover_path: watermarkCoverPath,
         enable_subtitles: enableSubtitles
       }
     };
@@ -1213,20 +1230,101 @@ export default function App() {
                 </div>
 
                 {cleanWatermark && (
-                  <div className="slider-group" style={{ marginTop: "8px" }}>
-                    <div className="slider-label-row">
-                      <span style={{ fontSize: "11px", color: "var(--text-muted)" }}>Tỷ lệ cắt đỉnh đầu:</span>
-                      <span className="slider-value" style={{ fontSize: "12px" }}>{watermarkCropPct}%</span>
+                  <>
+                    <div className="slider-group" style={{ marginTop: "8px" }}>
+                      <div className="slider-label-row">
+                        <span style={{ fontSize: "11px", color: "var(--text-muted)" }}>Tỷ lệ cắt đỉnh đầu:</span>
+                        <span className="slider-value" style={{ fontSize: "12px" }}>{watermarkCropPct}%</span>
+                      </div>
+                      <input
+                        type="range"
+                        min="5"
+                        max="25"
+                        step="1"
+                        value={watermarkCropPct}
+                        onChange={(e) => setWatermarkCropPct(parseInt(e.target.value))}
+                      />
                     </div>
-                    <input
-                      type="range"
-                      min="5"
-                      max="25"
-                      step="1"
-                      value={watermarkCropPct}
-                      onChange={(e) => setWatermarkCropPct(parseInt(e.target.value))}
-                    />
-                  </div>
+
+                    <div className="slider-group" style={{ marginTop: "10px" }}>
+                      <div className="slider-label-row" style={{ marginBottom: "4px" }}>
+                        <span style={{ fontSize: "11px", color: "var(--text-muted)" }}>Kiểu bù mờ/bối cảnh:</span>
+                      </div>
+                      <select
+                        style={{
+                          width: "100%",
+                          padding: "6px",
+                          borderRadius: "4px",
+                          backgroundColor: "#222",
+                          border: "1px solid #444",
+                          color: "#fff",
+                          fontSize: "12px",
+                          cursor: "pointer"
+                        }}
+                        value={watermarkCoverType}
+                        onChange={(e) => setWatermarkCoverType(e.target.value)}
+                      >
+                        <option value="blur">Bù mờ (Blur)</option>
+                        <option value="image">Hình ảnh tùy chỉnh</option>
+                        <option value="video">Video tùy chỉnh (tự động lặp)</option>
+                      </select>
+                    </div>
+
+                    {(watermarkCoverType === "image" || watermarkCoverType === "video") && (
+                      <div style={{ marginTop: "10px", padding: "8px", border: "1px dashed #444", borderRadius: "4px", backgroundColor: "rgba(255,255,255,0.02)" }}>
+                        <label style={{ fontSize: "11px", color: "var(--text-muted)", display: "block", marginBottom: "6px" }}>
+                          Chọn tệp {watermarkCoverType === "image" ? "ảnh" : "video"} làm nền đè:
+                        </label>
+                        <input
+                          type="file"
+                          accept={watermarkCoverType === "image" ? "image/*" : "video/*"}
+                          style={{ display: "none" }}
+                          id="watermark-cover-file"
+                          onChange={async (e) => {
+                            const file = e.target.files?.[0];
+                            if (!file) return;
+                            
+                            setIsUploadingCover(true);
+                            const formData = new FormData();
+                            formData.append("file", file);
+                            
+                            try {
+                              const response = await fetch(`${BACKEND_URL}/api/watermark/upload-cover`, {
+                                method: "POST",
+                                body: formData
+                              });
+                              if (!response.ok) throw new Error("Upload failed");
+                              const resData = await response.json();
+                              setWatermarkCoverPath(resData.file_path);
+                              addLog(`Tải lên ảnh/video làm nền đè thành công: ${resData.filename}`, "success");
+                            } catch (err: any) {
+                              console.error(err);
+                              addLog(`Lỗi tải lên ảnh/video làm nền đè: ${err.message}`, "error");
+                              alert("Lỗi tải lên tệp làm nền đè.");
+                            } finally {
+                              setIsUploadingCover(false);
+                            }
+                          }}
+                        />
+                        <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                          <button
+                            type="button"
+                            className="btn btn-secondary btn-sm"
+                            style={{ padding: "4px 8px", fontSize: "11px" }}
+                            onClick={() => document.getElementById("watermark-cover-file")?.click()}
+                            disabled={isUploadingCover}
+                          >
+                            {isUploadingCover ? "Đang tải lên..." : "Chọn tệp..."}
+                          </button>
+                          {watermarkCoverPath && (
+                            <span style={{ fontSize: "11px", color: "#4caf50", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", display: "inline-block", maxWidth: "160px" }} title={watermarkCoverPath}>
+                              ✓ {watermarkCoverPath.split(/[\\/]/).pop()}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                  </>
                 )}
               </div>
             </div>

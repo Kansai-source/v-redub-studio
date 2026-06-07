@@ -118,63 +118,114 @@ def process_video_effects(
     aspect_ratio_mode = options.get("aspect_ratio_mode", "original")
     zoom_align = options.get("zoom_align", "center")
 
-    # 2. Build video filter chain
+    # 2. Build video filter chain using a link-based graph to avoid syntax issues with custom covers
     vf_list = []
+    current_v_link = "[0:v]"
     
-    # 2a. Visual enhancements (color & flip & drawbox) on original layout first
+    # Generate unique suffixes for nodes within the filter graph
+    import uuid
+    v_prefix = f"v_{uuid.uuid4().hex[:6]}"
+    
+    # 2a. Visual enhancements (color & flip) on original layout first
     if brightness != 0 or contrast != 1.0 or saturation != 1.0:
-        vf_list.append(f"eq=brightness={brightness}:contrast={contrast}:saturation={saturation}")
+        next_v_link = f"[{v_prefix}_eq]"
+        vf_list.append(f"{current_v_link}eq=brightness={brightness}:contrast={contrast}:saturation={saturation}{next_v_link}")
+        current_v_link = next_v_link
         
     if hflip:
-        vf_list.append("hflip")
+        next_v_link = f"[{v_prefix}_hflip]"
+        vf_list.append(f"{current_v_link}hflip{next_v_link}")
+        current_v_link = next_v_link
 
-    # Watermark Crop & Blur Strip (Top/Bottom border blur depending on zoom_align)
+    # Watermark Crop & Blur Strip (Top/Bottom border blur, or custom image/video banner)
     clean_watermark = bool(options.get("clean_watermark", False))
     watermark_crop_pct = float(options.get("watermark_crop_pct", 15.0))
+    watermark_cover_type = options.get("watermark_cover_type", "blur")
+    watermark_cover_path = options.get("watermark_cover_path", None)
+    
+    # Check if a custom cover is actually available on disk
+    is_custom_cover_available = False
+    if clean_watermark and watermark_crop_pct > 0 and watermark_cover_type != "blur" and watermark_cover_path:
+        is_custom_cover_available = os.path.exists(watermark_cover_path)
+
+    # Determine input index for the cover stream
+    cover_input_idx = None
+    if is_custom_cover_available:
+        cover_input_idx = 1
+        if tts_audio_path and os.path.exists(tts_audio_path):
+            cover_input_idx = 2
+
     if clean_watermark and watermark_crop_pct > 0:
         crop_h_expr = f"ih*{watermark_crop_pct/100:.4f}"
-        if zoom_align == "top": # Căn trên (Shave bottom) -> Cắt watermark dưới, chèn mờ đáy
+        next_v_link = f"[{v_prefix}_wm]"
+        
+        if is_custom_cover_available and cover_input_idx is not None:
+            # Custom Banner Image or Video
+            if zoom_align == "top": # Watermark is at bottom
+                drawbox_y = f"ih-{crop_h_expr}"
+                overlay_y = "H-h"
+            else: # Watermark is at top
+                drawbox_y = "0"
+                overlay_y = "0"
+                
             wm_filter = (
-                f"split[orig_wm][bg_wm];"
-                f"[bg_wm]boxblur=30:10[bg_wm_blurred];"
-                f"[orig_wm]crop=iw:ih-{crop_h_expr}:0:0[fg_wm];"
-                f"[bg_wm_blurred][fg_wm]overlay=0:0"
+                f"{current_v_link}drawbox=x=0:y={drawbox_y}:w=iw:h={crop_h_expr}:color=black:t=fill[{v_prefix}_blacked]; "
+                f"[{cover_input_idx}:v][{v_prefix}_blacked]scale2ref=w=iw:h=ih*{watermark_crop_pct/100:.4f}[{v_prefix}_cov_sc][{v_prefix}_ref]; "
+                f"[{v_prefix}_ref][{v_prefix}_cov_sc]overlay=0:{overlay_y}:shortest=1{next_v_link}"
             )
-        else: # Căn dưới (Shave top)/Chính giữa -> Cắt watermark trên, chèn mờ đỉnh
-            overlay_y_expr = f"H*{watermark_crop_pct/100:.4f}"
-            wm_filter = (
-                f"split[orig_wm][bg_wm];"
-                f"[bg_wm]boxblur=30:10[bg_wm_blurred];"
-                f"[orig_wm]crop=iw:ih-{crop_h_expr}:0:{crop_h_expr}[fg_wm];"
-                f"[bg_wm_blurred][fg_wm]overlay=0:{overlay_y_expr}"
-            )
+            print(f"[FFmpeg] Custom Watermark Cover active. Type: {watermark_cover_type}, Path: {watermark_cover_path}")
+        else:
+            # Standard Blur Cover
+            if zoom_align == "top": # Shave bottom -> crop bottom, insert blur at bottom
+                wm_filter = (
+                    f"{current_v_link}split[{v_prefix}_orig][{v_prefix}_bg]; "
+                    f"[{v_prefix}_bg]boxblur=30:10[{v_prefix}_bgblur]; "
+                    f"[{v_prefix}_orig]crop=iw:ih-{crop_h_expr}:0:0[{v_prefix}_fg]; "
+                    f"[{v_prefix}_bgblur][{v_prefix}_fg]overlay=0:0{next_v_link}"
+                )
+            else: # Shave top -> crop top, insert blur at top
+                overlay_y_expr = f"H*{watermark_crop_pct/100:.4f}"
+                wm_filter = (
+                    f"{current_v_link}split[{v_prefix}_orig][{v_prefix}_bg]; "
+                    f"[{v_prefix}_bg]boxblur=30:10[{v_prefix}_bgblur]; "
+                    f"[{v_prefix}_orig]crop=iw:ih-{crop_h_expr}:0:{crop_h_expr}[{v_prefix}_fg]; "
+                    f"[{v_prefix}_bgblur][{v_prefix}_fg]overlay=0:{overlay_y_expr}{next_v_link}"
+                )
+            print(f"[FFmpeg] Gaussian Blur Cover applied to watermark region.")
+            
         vf_list.append(wm_filter)
+        current_v_link = next_v_link
 
     # Anti-copyright: Micro-rotation
     rotate_angle = float(options.get("rotate_angle", 0.0))
     if rotate_angle != 0.0:
-        # Rotate by angle and zoom/crop slightly to hide black corners
-        # PI = 3.141592653589793
-        vf_list.append(f"rotate={rotate_angle}*PI/180:ow=rotw({rotate_angle}*PI/180):oh=roth({rotate_angle}*PI/180)")
-        vf_list.append("crop=iw*0.96:ih*0.96")
+        next_v_link = f"[{v_prefix}_rotate]"
+        vf_list.append(
+            f"{current_v_link}rotate={rotate_angle}*PI/180:ow=rotw({rotate_angle}*PI/180):oh=roth({rotate_angle}*PI/180),"
+            f"crop=iw*0.96:ih*0.96{next_v_link}"
+        )
+        current_v_link = next_v_link
 
-    # Anti-copyright: Dynamic Panning (Handheld Camera effect) - Completely Disabled
+    # Anti-copyright: Dynamic Panning (Completely Disabled)
     enable_dynamic_pan = False
-    if enable_dynamic_pan:
-        # Crop 90% and continuously pan the offset using sinusoidal function of time
-        vf_list.append("crop=iw*0.92:ih*0.92:(in_w-out_w)/2+(in_w-out_w)/2*sin(t*1.2):(in_h-out_h)/2+(in_h-out_h)/2*cos(t*0.9)")
         
     # 2b. Reframe aspect ratio (16:9 -> 9:16)
     if aspect_ratio_mode == "crop_9_16":
-        vf_list.append("crop=ih*9/16:ih,scale=720:1280")
+        next_v_link = f"[{v_prefix}_reframe]"
+        vf_list.append(f"{current_v_link}crop=ih*9/16:ih,scale=720:1280{next_v_link}")
+        current_v_link = next_v_link
+        
         if zoom > 0:
             crop_factor = 1.0 - (zoom / 100.0)
+            next_v_link = f"[{v_prefix}_zoom]"
             if zoom_align == "bottom":
-                vf_list.append(f"crop=720*{crop_factor}:1280*{crop_factor}:(720-ow)/2:1280-oh,scale=720:1280")
+                vf_list.append(f"{current_v_link}crop=720*{crop_factor}:1280*{crop_factor}:(720-ow)/2:1280-oh,scale=720:1280{next_v_link}")
             elif zoom_align == "top":
-                vf_list.append(f"crop=720*{crop_factor}:1280*{crop_factor}:(720-ow)/2:0,scale=720:1280")
+                vf_list.append(f"{current_v_link}crop=720*{crop_factor}:1280*{crop_factor}:(720-ow)/2:0,scale=720:1280{next_v_link}")
             else:
-                vf_list.append(f"crop=720*{crop_factor}:1280*{crop_factor},scale=720:1280")
+                vf_list.append(f"{current_v_link}crop=720*{crop_factor}:1280*{crop_factor},scale=720:1280{next_v_link}")
+            current_v_link = next_v_link
+            
     elif aspect_ratio_mode == "blur_9_16":
         fg_crop = ""
         if zoom > 0:
@@ -186,13 +237,16 @@ def process_video_effects(
             else:
                 fg_crop = f"crop=iw*{fg_factor}:ih*{fg_factor},"
             
+        next_v_link = f"[{v_prefix}_reframe]"
         blur_filter = (
-            f"split[orig_as][bg_as];"
-            f"[bg_as]scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,boxblur=20:10[bg_as_blurred];"
-            f"[orig_as]{fg_crop}scale=720:-1[fg_as];"
-            f"[bg_as_blurred][fg_as]overlay=(W-w)/2:(H-h)/2"
+            f"{current_v_link}split[{v_prefix}_as_orig][{v_prefix}_as_bg]; "
+            f"[{v_prefix}_as_bg]scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,boxblur=20:10[{v_prefix}_as_bgblur]; "
+            f"[{v_prefix}_as_orig]{fg_crop}scale=720:-1[{v_prefix}_as_fg]; "
+            f"[{v_prefix}_as_bgblur][{v_prefix}_as_fg]overlay=(W-w)/2:(H-h)/2{next_v_link}"
         )
         vf_list.append(blur_filter)
+        current_v_link = next_v_link
+        
     elif aspect_ratio_mode == "black_9_16":
         fg_crop = ""
         if zoom > 0:
@@ -204,28 +258,32 @@ def process_video_effects(
             else:
                 fg_crop = f"crop=iw*{fg_factor}:ih*{fg_factor},"
             
+        next_v_link = f"[{v_prefix}_reframe]"
         black_filter = (
-            f"split[orig_as][bg_as_dummy];"
-            f"color=c=black:s=720x1280[bg_as];"
-            f"[orig_as]{fg_crop}scale=720:-1[fg_as];"
-            f"[bg_as][fg_as]overlay=(W-w)/2:(H-h)/2"
+            f"{current_v_link}split[{v_prefix}_as_orig][{v_prefix}_as_bg_dum]; "
+            f"color=c=black:s=720x1280[{v_prefix}_as_bg]; "
+            f"[{v_prefix}_as_orig]{fg_crop}scale=720:-1[{v_prefix}_as_fg]; "
+            f"[{v_prefix}_as_bg][{v_prefix}_as_fg]overlay=(W-w)/2:(H-h)/2{next_v_link}"
         )
         vf_list.append(black_filter)
+        current_v_link = next_v_link
+        
     else:
         # Original 16:9
         if zoom > 0:
             crop_factor = 1.0 - (zoom / 100.0)
+            next_v_link = f"[{v_prefix}_zoom]"
             if zoom_align == "bottom":
-                vf_list.append(f"crop=iw*{crop_factor}:ih*{crop_factor}:(iw-ow)/2:ih-oh,scale=iw:ih")
+                vf_list.append(f"{current_v_link}crop=iw*{crop_factor}:ih*{crop_factor}:(iw-ow)/2:ih-oh,scale=iw:ih{next_v_link}")
             elif zoom_align == "top":
-                vf_list.append(f"crop=iw*{crop_factor}:ih*{crop_factor}:(iw-ow)/2:0,scale=iw:ih")
+                vf_list.append(f"{current_v_link}crop=iw*{crop_factor}:ih*{crop_factor}:(iw-ow)/2:0,scale=iw:ih{next_v_link}")
             else:
-                vf_list.append(f"crop=iw*{crop_factor}:ih*{crop_factor},scale=iw:ih")
+                vf_list.append(f"{current_v_link}crop=iw*{crop_factor}:ih*{crop_factor},scale=iw:ih{next_v_link}")
+            current_v_link = next_v_link
 
     # 2c. Subtitle Cover-up (drawbox) applied on final layout
     if cover_sub:
         cover_auto_fit = options.get("cover_auto_fit", True)
-        # Normalize color names for FFmpeg
         raw_color = cover_color.lower().strip()
         
         # Determine the maximum lines across all segments to have a consistent height and perfect alignment
@@ -257,22 +315,21 @@ def process_video_effects(
                         overlay_conds.append(f"between(t,{start:.3f},{end:.3f})")
             overlay_enable = f":enable='{'+'.join(overlay_conds)}'" if overlay_conds else ""
             
-            # Format split-crop-boxblur-overlay filterchain
-            # Radius=25, Power=5 yields a clean, strong blur effect to obscure original sub text
+            next_v_link = f"[{v_prefix}_sub_cover]"
             blur_filter = (
-                f"split[orig][sub_region]; "
-                f"[sub_region]crop=w=iw*{cover_w_pct:.4f}:h={estimated_h}:x=iw*{cover_x_pct:.4f}:y=max(0\\,{drawbox_y_expr}),"
-                f"boxblur=25:5[blurred]; "
-                f"[orig][blurred]overlay=x=iw*{cover_x_pct:.4f}:y='max(0\\,{drawbox_y_expr})'{overlay_enable}"
+                f"{current_v_link}split[{v_prefix}_sub_orig][{v_prefix}_sub_bg]; "
+                f"[{v_prefix}_sub_bg]crop=w=iw*{cover_w_pct:.4f}:h={estimated_h}:x=iw*{cover_x_pct:.4f}:y=max(0\\,{drawbox_y_expr}),"
+                f"boxblur=25:5[{v_prefix}_sub_bgblur]; "
+                f"[{v_prefix}_sub_orig][{v_prefix}_sub_bgblur]overlay=x=iw*{cover_x_pct:.4f}:y='max(0\\,{drawbox_y_expr})'{overlay_enable}{next_v_link}"
             )
             vf_list.append(blur_filter)
+            current_v_link = next_v_link
             print(f"[FFmpeg] Gaussian Blur Cover applied to sub region with height={estimated_h}px.")
         else:
             ffmpeg_color = "yellow" if raw_color == "gold" else raw_color
             if cover_auto_fit and segments:
-                import math
                 # Generate a drawbox filter for each segment
-                for seg in segments:
+                for i, seg in enumerate(segments):
                     start = float(seg.get("start", 0.0))
                     end = float(seg.get("end", 0.0))
                     if end <= start:
@@ -281,16 +338,17 @@ def process_video_effects(
                     estimated_w_pct = cover_w_pct
                     estimated_x_pct = cover_x_pct
                     
-                    # Use the global maximum extra_h for height consistency and alignment
                     estimated_h = cover_h_px + extra_h
                     drawbox_y_expr = f"ih*{cover_y_pct:.4f}-{extra_h}"
                     
-                    drawbox_filter = f"drawbox=x=iw*{estimated_x_pct:.4f}:y=max(0\\,{drawbox_y_expr}):w=iw*{estimated_w_pct:.4f}:h={estimated_h}:color={ffmpeg_color}:t=fill:enable='between(t,{start:.3f},{end:.3f})'"
+                    next_v_link = f"[{v_prefix}_db_{i}]"
+                    drawbox_filter = f"{current_v_link}drawbox=x=iw*{estimated_x_pct:.4f}:y=max(0\\,{drawbox_y_expr}):w=iw*{estimated_w_pct:.4f}:h={estimated_h}:color={ffmpeg_color}:t=fill:enable='between(t,{start:.3f},{end:.3f})'{next_v_link}"
                     vf_list.append(drawbox_filter)
+                    current_v_link = next_v_link
                 print(f"[FFmpeg] Dynamic Auto-Fit Cover Sub applied to {len(segments)} segments with color '{ffmpeg_color}'.")
             else:
                 # Fallback to single fixed drawbox
-                drawbox_filter = f"drawbox=x=iw*{cover_x_pct}:y=ih*{cover_y_pct}:w=iw*{cover_w_pct}:h={cover_h_px}:color={ffmpeg_color}:t=fill"
+                drawbox_filter_core = f"drawbox=x=iw*{cover_x_pct}:y=ih*{cover_y_pct}:w=iw*{cover_w_pct}:h={cover_h_px}:color={ffmpeg_color}:t=fill"
                 if segments:
                     drawbox_conds = []
                     for seg in segments:
@@ -299,8 +357,11 @@ def process_video_effects(
                         if end > start:
                             drawbox_conds.append(f"between(t,{start:.3f},{end:.3f})")
                     if drawbox_conds:
-                        drawbox_filter += f":enable='{'+'.join(drawbox_conds)}'"
-                vf_list.append(drawbox_filter)
+                        drawbox_filter_core += f":enable='{'+'.join(drawbox_conds)}'"
+                
+                next_v_link = f"[{v_prefix}_db_sub]"
+                vf_list.append(f"{current_v_link}{drawbox_filter_core}{next_v_link}")
+                current_v_link = next_v_link
                 print(f"[FFmpeg] Static Cover Sub is active during dialogue segments with color '{ffmpeg_color}'.")
 
     # 2d. Burn-in subtitles
@@ -310,32 +371,30 @@ def process_video_effects(
         temp_srt_name = f"sub_{os.path.basename(input_video_path)}.srt"
         shutil.copy2(srt_path, os.path.join(TEMP_DIR, temp_srt_name))
         escaped_srt = f"./{temp_srt_name}"
-        # Auto-adjust subtitle text color and dimensions to render below original subtitle
         sub_color = "&H00FFFF"  # Default yellow
         outline_color = "&H000000"
-        outline_val = 1.0  # Thin outline is cleaner and premium
-        back_color = "&H80000000"  # 50% opacity black shadow
-        shadow_val = 1.0  # Thin premium shadow
-        
-        # Font size is medium and not too big (10 in 288-pixel baseline ~= 25px in 720p base)
+        outline_val = 1.0
+        back_color = "&H80000000"
+        shadow_val = 1.0
         font_size = 10
         
-        # Calculate remaining space below original subtitle Y range
         ref_height = 720.0
         sub_y = cover_y_pct * ref_height
         sub_bottom = sub_y + cover_h_px
         rem_h = max(0.0, ref_height - sub_bottom)
         
-        # Place subtitle in the remaining space below original subtitle.
         margin_v_ref = max(6.0, rem_h * 0.25)
-        # Scale to 288p baseline used by libass (multiply by 0.4)
         subtitle_margin_v = max(2, int(margin_v_ref * 0.4))
                 
-        vf_list.append(f"subtitles={escaped_srt}:force_style='FontSize={font_size},Alignment=2,PrimaryColour={sub_color},OutlineColour={outline_color},Outline={outline_val},BackColour={back_color},Shadow={shadow_val},MarginV={subtitle_margin_v}'")
+        next_v_link = f"[{v_prefix}_subtitles]"
+        vf_list.append(f"{current_v_link}subtitles={escaped_srt}:force_style='FontSize={font_size},Alignment=2,PrimaryColour={sub_color},OutlineColour={outline_color},Outline={outline_val},BackColour={back_color},Shadow={shadow_val},MarginV={subtitle_margin_v}'{next_v_link}")
+        current_v_link = next_v_link
         
-    # 2d. Apply speed (should be done after burn-in subtitles so timeline matches, and at the end of vf chain)
+    # 2e. Apply speed
     if speed != 1.0:
-        vf_list.append(f"setpts=PTS/{speed}")
+        next_v_link = f"[{v_prefix}_speed]"
+        vf_list.append(f"{current_v_link}setpts=PTS/{speed}{next_v_link}")
+        current_v_link = next_v_link
 
     # 3. Formulate inputs and mappings
     args = []
@@ -347,33 +406,45 @@ def process_video_effects(
     if tts_audio_path and os.path.exists(tts_audio_path):
         args += ["-i", tts_audio_path]
         
-    # Video filter string
-    if vf_list:
-        args += ["-vf", ",".join(vf_list)]
-        
+    # Input 2/3: Optional Watermark Custom Cover
+    if is_custom_cover_available:
+        if watermark_cover_type == "video":
+            args += ["-stream_loop", "-1", "-i", watermark_cover_path]
+        else: # "image"
+            args += ["-loop", "1", "-i", watermark_cover_path]
+            
+    # Video and audio filter complex
+    filter_complex_elements = list(vf_list)
+    audio_map_src = None
+    
     # Audio complex filter if mixing
     atempo_str = f",atempo={speed}" if speed != 1.0 else ""
     
     if tts_audio_path and os.path.exists(tts_audio_path):
         # [0:a] is video's audio, [1:a] is tts audio input
-        # We mix them and apply the dynamic volumes. duration=first limits it to the video length
-        args += [
-            "-filter_complex", 
-            f"[0:a]volume='{orig_audio_filter_expr}':eval=frame[a0];[1:a]volume={tts_vol}[a1];[a0][a1]amix=inputs=2:duration=first:dropout_transition=2{atempo_str}[a]",
-            "-map", "0:v",
-            "-map", "[a]"
-        ]
+        audio_filter = f"[0:a]volume='{orig_audio_filter_expr}':eval=frame[a0];[1:a]volume={tts_vol}[a1];[a0][a1]amix=inputs=2:duration=first:dropout_transition=2{atempo_str}[a]"
+        filter_complex_elements.append(audio_filter)
+        audio_map_src = "[a]"
     else:
         # If no TTS, just copy or map original audio directly
-        # If user selected original_audio_vol = 0 (mute), we omit audio map or use -an
         if original_vol <= 0:
-            args += ["-an"]
+            audio_map_src = None
         else:
-            args += [
-                "-filter_complex", f"[0:a]volume={original_vol}{atempo_str}[a]",
-                "-map", "0:v",
-                "-map", "[a]"
-            ]
+            audio_filter = f"[0:a]volume={original_vol}{atempo_str}[a]"
+            filter_complex_elements.append(audio_filter)
+            audio_map_src = "[a]"
+            
+    if filter_complex_elements:
+        args += ["-filter_complex", "; ".join(filter_complex_elements)]
+        
+    # Map video
+    args += ["-map", current_v_link]
+    
+    # Map audio
+    if audio_map_src:
+        args += ["-map", audio_map_src]
+    else:
+        args += ["-an"]
         
     # Output video codec settings. GPU acceleration if NVIDIA NVENC is available.
     _has_nvenc = False
@@ -405,9 +476,12 @@ def process_video_effects(
 
     args += [
         "-c:a", "aac",
-        "-b:a", "192k",
-        output_video_path
+        "-b:a", "192k"
     ]
+    if is_custom_cover_available:
+        args += ["-shortest"]
+        
+    args += [output_video_path]
     
     # Execute commands inside TEMP_DIR context to keep file paths clean
     success = run_ffmpeg_cmd(args, cwd=str(TEMP_DIR))
