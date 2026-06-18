@@ -6,6 +6,15 @@ import urllib.parse
 import urllib.request
 import torch
 from backend.config import TEMP_DIR
+import re
+
+def strip_trailing_punctuation(text: str) -> str:
+    """Helper to clean trailing punctuation from subtitle lines dynamically."""
+    if not text:
+        return text
+    # Strip spaces and trailing characters like , . ; : including CJK equivalents ， 。 ； ：
+    return re.sub(r'[\s,.;:，。；：]+$', '', text)
+
 
 _whisper_model = None
 _whisper_model_name = None
@@ -29,9 +38,27 @@ def get_whisper_model(model_name: str = "base"):
         print(f"[AI Service] Error loading local Whisper model: {e}")
         return None
 
+def unload_whisper_model():
+    """Explicitly unloads the local Whisper model from memory/VRAM."""
+    global _whisper_model, _whisper_model_name
+    if _whisper_model is not None:
+        print("[AI Service] Unloading local Whisper model...")
+        _whisper_model = None
+        _whisper_model_name = None
+        import gc
+        import torch
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
 def split_long_segment(seg_text: str, start: float, end: float) -> list:
     """Splits large segments into shorter segments proportionally by word count/length."""
-    words = seg_text.split()
+    has_spaces = len(seg_text.split()) >= 3 or " " in seg_text
+    if not has_spaces and len(seg_text) > 5:
+        words = list(seg_text)
+    else:
+        words = seg_text.split()
+        
     if len(words) <= 12:
         return [{"text": seg_text, "start": start, "end": end}]
         
@@ -42,7 +69,10 @@ def split_long_segment(seg_text: str, start: float, end: float) -> list:
     
     for i in range(0, total_words, chunk_size):
         chunk_words = words[i:i+chunk_size]
-        chunk_text = " ".join(chunk_words)
+        if not has_spaces and len(seg_text) > 5:
+            chunk_text = "".join(chunk_words)
+        else:
+            chunk_text = " ".join(chunk_words)
         
         c_start = start + (i / total_words) * duration
         c_end = start + (min(i + chunk_size, total_words) / total_words) * duration
@@ -52,6 +82,354 @@ def split_long_segment(seg_text: str, start: float, end: float) -> list:
             "end": round(c_end, 2)
         })
     return chunks
+
+def split_segment_recursive(text: str, orig_text: str, start: float, end: float, gender: str, speaker_id: str, emotion: str, max_words: int = 8) -> list:
+    """Helper method to recursively divide segments on sentence, clause, or midpoint word breaks
+    until translation word count is no more than max_words.
+    """
+    import re
+    duration = end - start
+    if duration <= 0:
+        return [{
+            "start": round(start, 2),
+            "end": round(end, 2),
+            "original_text": orig_text,
+            "text": text,
+            "gender": gender,
+            "speaker_id": speaker_id,
+            "emotion": emotion
+        }]
+        
+    has_spaces = len(text.split()) >= 3 or " " in text
+    if not has_spaces and len(text) > 5:
+        text_words = list(text)
+    else:
+        text_words = text.split()
+        
+    has_orig_spaces = len(orig_text.split()) >= 3 or " " in orig_text
+    if not has_orig_spaces and len(orig_text) > 5:
+        orig_words = list(orig_text)
+    else:
+        orig_words = orig_text.split()
+    
+    # If the segment is already within the word limit, stop splitting
+    if len(text_words) <= max_words:
+        return [{
+            "start": round(start, 2),
+            "end": round(end, 2),
+            "original_text": orig_text,
+            "text": text,
+            "gender": gender,
+            "speaker_id": speaker_id,
+            "emotion": emotion
+        }]
+        
+    # 1. Try splitting by sentence delimiters (. ! ?)
+    sentence_delimiters = re.compile(r'([.!?])\s+')
+    zh_delimiters = re.compile(r'([。！？])\s*')
+    
+    text_parts = []
+    last_end = 0
+    active_sentence_delimiters = zh_delimiters if (not has_spaces and len(text) > 5) else sentence_delimiters
+    for match in active_sentence_delimiters.finditer(text):
+        pos = match.end()
+        part = text[last_end:pos].strip()
+        if part:
+            text_parts.append(part)
+        last_end = pos
+    part = text[last_end:].strip()
+    if part:
+        text_parts.append(part)
+        
+    orig_parts = []
+    last_end = 0
+    for match in zh_delimiters.finditer(orig_text):
+        pos = match.end()
+        part = orig_text[last_end:pos].strip()
+        if part:
+            orig_parts.append(part)
+        last_end = pos
+    part = orig_text[last_end:].strip()
+    if part:
+        orig_parts.append(part)
+        
+    # Fallback for original texts without East Asian punctuation but with English delimiters
+    if len(orig_parts) <= 1:
+        orig_parts = []
+        last_end = 0
+        for match in sentence_delimiters.finditer(orig_text):
+            pos = match.end()
+            part = orig_text[last_end:pos].strip()
+            if part:
+                orig_parts.append(part)
+            last_end = pos
+        part = orig_text[last_end:].strip()
+        if part:
+            orig_parts.append(part)
+            
+    if len(text_parts) > 1 and len(text_parts) == len(orig_parts):
+        total_chars = sum(len(p) for p in text_parts)
+        if total_chars > 0:
+            child_segments = []
+            current_start = start
+            for i, (t_part, o_part) in enumerate(zip(text_parts, orig_parts)):
+                ratio = len(t_part) / total_chars
+                part_dur = duration * ratio
+                current_end = current_start + part_dur
+                
+                c_start = round(current_start, 2)
+                c_end = round(current_end, 2)
+                if i == len(text_parts) - 1:
+                    c_end = round(end, 2)
+                
+                child_segments.extend(
+                    split_segment_recursive(t_part, o_part, c_start, c_end, gender, speaker_id, emotion, max_words)
+                )
+                current_start = current_end
+            return child_segments
+
+    # 2. Try splitting by clause punctuation (commas, semicolons)
+    clause_delimiters = re.compile(r'([,;])\s+')
+    zh_clause_delimiters = re.compile(r'([，；])\s*')
+    
+    text_parts = []
+    last_end = 0
+    active_clause_delimiters = zh_clause_delimiters if (not has_spaces and len(text) > 5) else clause_delimiters
+    for match in active_clause_delimiters.finditer(text):
+        pos = match.end()
+        part = text[last_end:pos].strip()
+        if part:
+            text_parts.append(part)
+        last_end = pos
+    part = text[last_end:].strip()
+    if part:
+        text_parts.append(part)
+        
+    orig_parts = []
+    last_end = 0
+    for match in zh_clause_delimiters.finditer(orig_text):
+        pos = match.end()
+        part = orig_text[last_end:pos].strip()
+        if part:
+            orig_parts.append(part)
+        last_end = pos
+    part = orig_text[last_end:].strip()
+    if part:
+        orig_parts.append(part)
+        
+    if len(orig_parts) <= 1:
+        orig_parts = []
+        last_end = 0
+        for match in clause_delimiters.finditer(orig_text):
+            pos = match.end()
+            part = orig_text[last_end:pos].strip()
+            if part:
+                orig_parts.append(part)
+            last_end = pos
+        part = orig_text[last_end:].strip()
+        if part:
+            orig_parts.append(part)
+            
+    if len(text_parts) > 1 and len(text_parts) == len(orig_parts):
+        total_chars = sum(len(p) for p in text_parts)
+        if total_chars > 0:
+            child_segments = []
+            current_start = start
+            for i, (t_part, o_part) in enumerate(zip(text_parts, orig_parts)):
+                ratio = len(t_part) / total_chars
+                part_dur = duration * ratio
+                current_end = current_start + part_dur
+                
+                c_start = round(current_start, 2)
+                c_end = round(current_end, 2)
+                if i == len(text_parts) - 1:
+                    c_end = round(end, 2)
+                
+                child_segments.extend(
+                    split_segment_recursive(t_part, o_part, c_start, c_end, gender, speaker_id, emotion, max_words)
+                )
+                current_start = current_end
+            return child_segments
+
+    # 3. Mismatch / Mute Fallback: Split in half by word/character count
+    if len(text_words) >= 2:
+        mid_word = len(text_words) // 2
+        
+        # Split original text: by words if spaced, otherwise by character index (for Chinese/Japanese/etc.)
+        if len(orig_words) >= 2:
+            mid_orig = len(orig_words) // 2
+            if not has_orig_spaces and len(orig_text) > 5:
+                o1 = "".join(orig_words[:mid_orig])
+                o2 = "".join(orig_words[mid_orig:])
+            else:
+                o1 = " ".join(orig_words[:mid_orig])
+                o2 = " ".join(orig_words[mid_orig:])
+        else:
+            mid_orig = len(orig_text) // 2
+            o1 = orig_text[:mid_orig]
+            o2 = orig_text[mid_orig:]
+            
+        if not has_spaces and len(text) > 5:
+            t1 = "".join(text_words[:mid_word])
+            t2 = "".join(text_words[mid_word:])
+        else:
+            t1 = " ".join(text_words[:mid_word])
+            t2 = " ".join(text_words[mid_word:])
+        
+        mid_time = start + (duration * 0.5)
+        
+        child1 = split_segment_recursive(t1, o1, start, mid_time, gender, speaker_id, emotion, max_words)
+        child2 = split_segment_recursive(t2, o2, mid_time, end, gender, speaker_id, emotion, max_words)
+        return child1 + child2
+        
+    return [{
+        "start": round(start, 2),
+        "end": round(end, 2),
+        "original_text": orig_text,
+        "text": text,
+        "gender": gender,
+        "speaker_id": speaker_id,
+        "emotion": emotion
+    }]
+
+def split_segment_by_sentences(seg: dict, max_words: int = 10) -> list:
+    """Splits a single dialogue segment into multiple sub-segments based on sentence punctuation
+    delimiters, clause boundaries, and word limit constraints to optimize subtitle readability.
+    """
+    text = seg.get("text", "").strip()
+    orig_text = seg.get("original_text", "").strip()
+    if not text:
+        text = orig_text
+    start = seg.get("start", 0.0)
+    end = seg.get("end", 0.0)
+    gender = seg.get("gender", "female")
+    speaker_id = seg.get("speaker_id", "female_1")
+    emotion = seg.get("emotion", "neutral")
+    
+    return split_segment_recursive(text, orig_text, start, end, gender, speaker_id, emotion, max_words=max_words)
+
+def translate_segments_batch(segments: list, gemini_key: str, gemini_model: str, target_lang_name: str, gemini_api_endpoint: str = None) -> list:
+    """Translates a batch of compiled dialogue segments in a single text-to-text call to Gemini."""
+    if not segments:
+        return []
+        
+    from google import genai
+    from google.genai import types
+    import json
+    import time
+    
+    # Configure API
+    client_options = {}
+    if gemini_api_endpoint:
+        url = gemini_api_endpoint.strip()
+        if not url.startswith("http://") and not url.startswith("https://"):
+            url = "https://" + url
+        client_options['http_options'] = {'base_url': url.rstrip("/")}
+        
+    client = genai.Client(api_key=gemini_key, **client_options)
+        
+    # Prepare translation input with duration context to guide Gemini
+    input_list = []
+    for seg in segments:
+        duration = round(float(seg.get("end", 0.0)) - float(seg.get("start", 0.0)), 2)
+        # Fallback to a default duration if values are invalid
+        if duration <= 0:
+            duration = 3.0
+        input_list.append({
+            "id": seg["id"],
+            "original_text": seg["original_text"],
+            "duration_seconds": duration
+        })
+    
+    prompt = f"""
+Bạn là biên dịch viên lồng tiếng chuyên nghiệp. Dịch danh sách các câu thoại sau sang {target_lang_name}.
+Giữ nguyên cấu trúc JSON và thứ tự mảng. Trả kết quả dịch vào key "text" cho mỗi mục.
+
+QUY TẮC BẮT BUỘC:
+1. Chỉ trả về MỘT mảng JSON hợp lệ gồm các object có key "id" và "text". KHÔNG bao gồm markdown (```) hay giải thích gì thêm.
+2. ĐỌC HIỂU NGỮ CẢNH CHUỖI: Danh sách câu thoại đầu vào được xếp theo thứ tự thời gian liên tục. Hãy đọc hiểu các câu kề nhau để hiểu ngữ cảnh chung của câu chuyện và dịch mạch lạc, đồng nhất đại từ xưng hô và thuật ngữ.
+3. DỊCH THEO Ý, TỰ NHIÊN: KHÔNG dịch word-for-word. Ưu tiên văn phong nói tự nhiên của người Việt, KHÔNG dịch khô cứng kiểu dịch máy.
+4. THỐNG NHẤT THUẬT NGỮ:
+   - Các từ liên quan đến hội họp chiêu thương (như "招商会") phải dịch nhất quán thành "hội nghị chiêu thương" hoặc "hội nghị xúc tiến đầu tư".
+   - "老员工" dịch là "nhân viên kỳ cựu", "nhân viên lâu năm" hoặc "tiền bối tại công sở" (KHÔNG dịch thành "đồng nghiệp cũ" đã nghỉ việc).
+5. SỬA LỖI ĐỒNG ÂM CỦA WHISPER: Có một số từ do nhận diện giọng nói nói nhanh bị ghi sai chữ gốc:
+   - Nếu trong văn cảnh kinh doanh, lên lịch họp, kế hoạch làm việc mà bản gốc ghi "大好天" (ngày nắng đẹp) thì thực chất người nói muốn nói "大后天" (ngày mốt/ngày kia) -> hãy dịch là "ngày mốt" hoặc "ngày kia".
+   - Nếu là vế câu so sánh ví dụ mà bản gốc ghi "想招商会" thì thực chất là "像招商会" -> hãy dịch là "giống như hội nghị chiêu thương/xúc tiến đầu tư".
+6. Tham khảo "duration_seconds" để cân nhắc độ dài câu dịch — câu có duration ngắn thì dịch ngắn gọn để nói kịp, nhưng không được lược bỏ thông tin cốt lõi.
+7. KHÔNG dịch thành ngữ Trung Quốc theo kiểu phiên âm Hán Việt thô cứng (ví dụ KHÔNG dịch "不言而喻" thành "Bất Ngôn Nhi Dụ", mà dịch thành "Hiển nhiên" hoặc "Không nói cũng rõ").
+8. KHÔNG RÒ RỈ CHỮ NƯỚC NGOÀI: Bản dịch phải bằng {target_lang_name} 100%. Tuyệt đối không để lẫn chữ Trung Quốc, Nhật Bản, Thái Lan hoặc bất kỳ ký tự unicode lạ nào khác trong câu dịch.
+9. ĐỘ DÀI tối thiểu cho các câu thoại cực ngắn: Nếu câu dịch quá ngắn (1-2 từ như "Được", "Vâng", "Ừ"), hãy tự diễn giải tự nhiên thành cụm từ dài hơn (3-5 từ, ví dụ "Được rồi ạ", "Vâng tôi biết rồi", "Tôi đồng ý", "Đúng vậy ạ") nhằm giúp công cụ tổng hợp giọng nói hoạt động ổn định và giữ được tông giọng chuẩn.
+
+Input:
+{json.dumps(input_list, ensure_ascii=False)}
+"""
+
+
+    max_retries = 3
+    retry_delay = 2.0
+    
+    for attempt in range(1, max_retries + 1):
+        try:
+            response = client.models.generate_content(
+                model=gemini_model,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json"
+                )
+            )
+            content = response.text.strip()
+            if content.startswith("```"):
+                lines = content.split("\n")
+                if lines[0].startswith("```"):
+                    lines = lines[1:]
+                if lines[-1].startswith("```"):
+                    lines = lines[:-1]
+                content = "\n".join(lines).strip()
+                
+            translated_data = json.loads(content)
+            
+            # Map translated back to input segments
+            translations = {item["id"]: item.get("text", "") for item in translated_data}
+            result_texts = []
+            for seg in segments:
+                text_val = translations.get(seg["id"], "").strip()
+                
+                # Check for foreign (Chinese, Japanese, Thai) characters to reject bad translations early
+                has_leakage = False
+                if text_val:
+                    if re.search(r'[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\u0e00-\u0e7f]', text_val):
+                        print(f"[AI Service] Rejecting leaked foreign characters in Gemini translation: '{text_val}'. Falling back to Google Translate.")
+                        has_leakage = True
+                        
+                if not text_val or has_leakage:
+                    try:
+                        text_val = translate_text(seg["original_text"], target_lang="vi" if target_lang_name == "Vietnamese" else "en")
+                    except Exception:
+                        text_val = seg["original_text"]
+                
+                # Double guard: Strip any remaining stray foreign character ranges to avoid model panic
+                if text_val:
+                    text_val = re.sub(r'[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\u0e00-\u0e7f]', '', text_val)
+                    text_val = re.sub(r'\s+', ' ', text_val).strip()
+                    
+                result_texts.append(text_val)
+            return result_texts
+        except Exception as ex:
+            print(f"[AI Service] Translation batch attempt {attempt} failed: {ex}")
+            if attempt < max_retries:
+                time.sleep(retry_delay)
+                retry_delay *= 2.0
+                
+    # Fallback to simple Google Translate if Gemini translation repeatedly fails
+    print("[AI Service] Gemini batch translation failed all retries. Falling back to public translate API...")
+    fallback_texts = []
+    for seg in segments:
+        try:
+            val = translate_text(seg["original_text"], target_lang="vi" if target_lang_name == "Vietnamese" else "en")
+            fallback_texts.append(val)
+        except Exception:
+            fallback_texts.append(seg["original_text"])
+    return fallback_texts
 
 def translate_text(text: str, target_lang: str = "vi") -> str:
     """Translates text to target language using the free public Google Translate API."""
@@ -142,6 +520,72 @@ def split_audio_into_chunks(audio_path: str, chunk_length_sec: float = 300.0) ->
         
     return chunks
 
+def generate_content_with_gemini_audio(
+    model_name: str,
+    prompt: str,
+    chunk_file: str,
+    audio_data: bytes,
+    gemini_key: str,
+    gemini_api_endpoint: Optional[str] = None,
+    timeout: float = 600.0
+):
+    from google import genai
+    from google.genai import types
+    import time
+
+    # Files API is preferred when we are talking to the official API (no custom proxy api_endpoint)
+    # Reverted to False to use Base64 to optimize API request counts as requested
+    use_files_api = False
+    uploaded_file = None
+
+    try:
+        client_options = {}
+        if gemini_api_endpoint:
+            url = gemini_api_endpoint.strip()
+            if not url.startswith("http://") and not url.startswith("https://"):
+                url = "https://" + url
+            client_options['http_options'] = {'base_url': url.rstrip("/")}
+            
+        client = genai.Client(api_key=gemini_key, **client_options)
+        
+        if use_files_api:
+            print(f"[AI Service] Uploading audio chunk via Gemini Files API: {chunk_file}...")
+            uploaded_file = client.files.upload(file=chunk_file)
+            
+            # Wait for file to become active (usually instant for audio, but let's check state)
+            limit = 15
+            while uploaded_file.state.name == "PROCESSING" and limit > 0:
+                time.sleep(1)
+                uploaded_file = client.files.get(name=uploaded_file.name)
+                limit -= 1
+            
+            contents = [prompt, uploaded_file]
+        else:
+            print(f"[AI Service] Proxy/Custom endpoint active. Sending inline base64 audio data...")
+            contents = [
+                prompt,
+                types.Part.from_bytes(
+                    data=audio_data,
+                    mime_type="audio/mp3",
+                )
+            ]
+
+        response = client.models.generate_content(
+            model=model_name,
+            contents=contents,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json"
+            )
+        )
+        return response
+    finally:
+        if uploaded_file is not None:
+            try:
+                print(f"[AI Service] Cleaning up uploaded file from Gemini: {uploaded_file.name}...")
+                client.files.delete(name=uploaded_file.name)
+            except Exception as delete_err:
+                print(f"[AI Service] Failed to delete file {uploaded_file.name}: {delete_err}")
+
 def transcribe_with_gemini(
     audio_path: str,
     gemini_key: str,
@@ -149,15 +593,18 @@ def transcribe_with_gemini(
     gemini_chunk_size: float = 900.0,
     gemini_api_endpoint: Optional[str] = None,
     target_lang: str = "vi",
-    source_lang: str = "auto"
+    source_lang: str = "auto",
+    narration: bool = False
 ) -> dict:
-    """Uses Google Gemini API to split audio context, transcribe, translate, and assign speaker values."""
+    """Uses Google Gemini API to split audio context, transcribe (original only), diarize, and translate in two stages."""
     if not gemini_key:
         return {"success": False, "error": "Gemini API key is required"}
         
     print(f"[AI Service] Loading Gemini API with key and model {gemini_model}...")
     import google.generativeai as genai
     import time
+    import json
+    import os
     
     client_options = {}
     if gemini_api_endpoint:
@@ -169,141 +616,363 @@ def transcribe_with_gemini(
     else:
         genai.configure(api_key=gemini_key)
     
-    # For custom proxy endpoints, cap the chunk size to 120 seconds (2 minutes) to prevent "413 Payload Too Large" and "524 Timeout" errors
-    effective_chunk_size = gemini_chunk_size
-    if gemini_api_endpoint:
-        effective_chunk_size = min(gemini_chunk_size, 120.0)
-        print(f"[AI Service] Custom endpoint active, using effective chunk size: {effective_chunk_size}s")
+    # Cap gemini chunk size to 300.0 seconds (5 minutes) globally to ensure high attention and avoid Gemini output token limits.
+    effective_chunk_size = min(gemini_chunk_size or 300.0, 300.0)
+    print(f"[AI Service] Using transcription chunk size: {effective_chunk_size}s")
+
 
     # 1. Split audio track into smaller segments
     chunks = split_audio_into_chunks(audio_path, chunk_length_sec=effective_chunk_size)
     global_segments = []
-    seg_counter = 0
-    global_speaker_profiles = {}  # maps speaker_id -> short vocal description & role
-    
-    for chunk_file, time_offset in chunks:
-        print(f"[AI Service] Processing chunk: {os.path.basename(chunk_file)} (Start offset: {time_offset} seconds)")
-        
-        # Build profiles context for prompt instruction continuity
-        profiles_context = ""
-        if global_speaker_profiles:
-            profiles_context = "\nHere are the speakers already identified in previous segments. Match the voices in this new segment to these profiles if they are the same voice:\n"
-            for spk_id, desc in global_speaker_profiles.items():
-                profiles_context += f"- {spk_id}: {desc}\n"
-                
-        lang_names = {
-            "vi": "Vietnamese",
-            "en": "English",
-            "ko": "Korean",
-            "zh": "Chinese",
-            "ja": "Japanese"
-        }
-        target_lang_name = lang_names.get(target_lang, "Vietnamese")
-        
-        source_context = ""
-        if source_lang and source_lang != "auto":
-            lang_names_full = {
-                "zh": "Chinese",
-                "en": "English",
-                "ko": "Korean",
-                "ja": "Japanese"
-            }
-            source_context = f"\nThe original spoken language of the audio is {lang_names_full.get(source_lang, source_lang)}."
 
-        prompt = f"""
-Analyze this audio segment. You must output a JSON list of dialogue segments with timestamps, original spoken text, and exact {target_lang_name} translation. 
+    lang_names = {
+        "vi": "Vietnamese",
+        "en": "English",
+        "ko": "Korean",
+        "zh": "Chinese",
+        "ja": "Japanese"
+    }
+    target_lang_name = lang_names.get(target_lang, "Vietnamese")
+
+    if narration:
+        import concurrent.futures
+        
+        def process_chunk_parallel(chunk_index: int, chunk_file: str, time_offset: float):
+            print(f"[AI Service] Parallel processing chunk {chunk_index}: {os.path.basename(chunk_file)} (Start offset: {time_offset} seconds)")
+            
+            source_context = ""
+            if source_lang and source_lang != "auto":
+                lang_names_full = {
+                    "zh": "Chinese",
+                    "en": "English",
+                    "ko": "Korean",
+                    "ja": "Japanese"
+                }
+                source_context = f"\nThe original spoken language of the audio is {lang_names_full.get(source_lang, source_lang)}."
+            
+            prompt_rules = f"""1. SEGMENTATION: Split the transcription into short, natural dialogue segments. Each segment should contain only 1 or 2 small clauses. You MUST include proper sentence punctuation (such as '.', '?', '!' or Chinese '。', '？', '！') in "original_text" to mark sentence endings clearly.
+2. GENDER & SPEAKER CLASSIFICATION: Since Narration mode is active (single voiceover narration), you DO NOT need to classify genders or differentiate voices. Output "gender": "narration", "speaker_id": "narration", and "vocal_description": "narration" for every segment. Do not analyze role or speaker changes."""
+
+            prompt = f"""
+You are an expert audio transcriber and subtitling specialist. Analyze this audio chunk and return a JSON array containing timestamps, original spoken text, and speaker details. DO NOT translate the text.
 {source_context}
 
-CRITICAL REQUIREMENT: You must split the transcription into short, natural dialogue segments. Each segment should contain only 1 or 2 small clauses (typically between 3 to 12 words, or representing a single short sentence/phrase). Do NOT group multiple independent sentences or long paragraphs into a single segment; split them into consecutive segments matching their exact start/end times.
+CRITICAL RULES:
+{prompt_rules}
 
-Also, classify the gender of the speaker for each segment as male or female based on the speaker voice sound.
-In addition, differentiate between distinct speakers in the audio. Assign a unique "speaker_id" to each segment representing who is speaking.
-{profiles_context}
-If a speaker matches an existing profile listed above, you MUST use that exact "speaker_id". If it is a new speaker, create a new "speaker_id" (e.g. if the last one was male_2, make it male_3).
-For EACH segment, provide a "vocal_description" (less than 20 words describing the voice characteristics like pitch, tone, age, speed, or conversational role in this segment).
-In addition, evaluate the emotion and vocal emotion tone for each segment based on the context and sound. Classify it into one of these emotions: "neutral", "excited", "angry", "whisper", "scared", "crying", "sad".
+OUTPUT FORMAT:
+Return ONLY a valid JSON array of objects with the exact schema below. Do not include any HTML tags, conversational preamble, or markdown formatting blocks (such as ```json).
 
-Format the output strictly as a JSON array of objects, with these fields:
+Schema:
 [
   {{
     "start": 0.00,
     "end": 2.50,
     "original_text": "text in original language",
-    "text": "{target_lang_name} translation text",
-    "gender": "male" or "female",
-    "speaker_id": "male_1",
-    "vocal_description": "short description of voice quality and conversation role",
-    "emotion": "neutral" or "excited" or "angry" or "whisper" or "scared" or "crying" or "sad"
+    "gender": "narration",
+    "speaker_id": "narration",
+    "vocal_description": "narration"
   }}
 ]
-
-Respond ONLY with this JSON array. No markdown formatting, no code blocks, just raw JSON.
 """
-
-        try:
-            # Read local audio chunk data to send inline
-            print(f"-- Reading audio file: {chunk_file} ...")
-            with open(chunk_file, "rb") as f:
-                audio_data = f.read()
-
-            print(f"-- Sending generation request with inline audio...")
-            model = genai.GenerativeModel(gemini_model)
-            response = model.generate_content(
-                [
-                    prompt,
-                    {
-                        "mime_type": "audio/mp3",
-                        "data": audio_data
-                    }
-                ],
-                generation_config={"response_mime_type": "application/json"},
-                request_options={"timeout": 360.0}
-            )
-                
-            content = response.text.strip()
+            max_retries = 3
+            retry_delay = 2.0
+            last_error = None
             
-            if content.startswith("```"):
-                lines = content.split("\n")
-                if lines[0].startswith("```"):
-                    lines = lines[1:]
-                if lines[-1].startswith("```"):
-                    lines = lines[:-1]
-                content = "\n".join(lines).strip()
-                
-            chunk_data = json.loads(content)
-            
-            for item in chunk_data:
-                spk_id = item.get("speaker_id")
-                vocal_desc = item.get("vocal_description", "")
-                
-                # Check and persist new speaker profiles
-                if spk_id and vocal_desc and spk_id not in global_speaker_profiles:
-                    global_speaker_profiles[spk_id] = vocal_desc
+            try:
+                with open(chunk_file, "rb") as f:
+                    audio_data = f.read()
+            except Exception as read_err:
+                print(f"[AI Service] Failed to read audio chunk (parallel) {chunk_file}: {read_err}")
+                if chunk_file != audio_path and os.path.exists(chunk_file):
+                    try:
+                        os.remove(chunk_file)
+                    except Exception:
+                        pass
+                raise read_err
+
+            for attempt in range(1, max_retries + 1):
+                try:
+                    print(f"-- [Parallel Chunk {chunk_index}] Sending generation request (Attempt {attempt}/{max_retries})...")
+                    response = generate_content_with_gemini_audio(
+                        model_name=gemini_model,
+                        prompt=prompt,
+                        chunk_file=chunk_file,
+                        audio_data=audio_data,
+                        gemini_key=gemini_key,
+                        gemini_api_endpoint=gemini_api_endpoint,
+                        timeout=600.0
+                    )
                     
-                gender_val = item.get("gender", "female")
-                global_segments.append({
-                    "id": seg_counter,
-                    "start": float(item["start"]) + time_offset,
-                    "end": float(item["end"]) + time_offset,
-                    "original_text": item["original_text"],
-                    "text": item["text"],
-                    "gender": gender_val,
-                    "speaker_id": spk_id or f"{gender_val}_1",
-                    "emotion": item.get("emotion", "neutral")
-                })
-                seg_counter += 1
-                
-        except Exception as chunk_error:
-            print(f"[AI Service] Failed on chunk {chunk_file}: {chunk_error}")
-            pass
-        finally:
-            # Delete local sub-chunk file if it's not the original file
+                    content = response.text.strip()
+                    if content.startswith("```"):
+                        lines = content.split("\n")
+                        if lines[0].startswith("```"):
+                            lines = lines[1:]
+                        if lines[-1].startswith("```"):
+                            lines = lines[:-1]
+                        content = "\n".join(lines).strip()
+                        
+                    chunk_data = json.loads(content)
+                    chunk_segments = []
+                    
+                    for item in chunk_data:
+                        chunk_segments.append({
+                            "start": float(item["start"]) + time_offset,
+                            "end": float(item["end"]) + time_offset,
+                            "original_text": item.get("original_text", "").strip(),
+                            "text": "",
+                            "gender": "narration",
+                            "speaker_id": "narration",
+                            "emotion": "neutral"
+                        })
+                            
+                    # Clean up chunk file
+                    if chunk_file != audio_path and os.path.exists(chunk_file):
+                        try:
+                            os.remove(chunk_file)
+                        except Exception:
+                            pass
+                    return chunk_segments
+                    
+                except Exception as chunk_error:
+                    last_error = chunk_error
+                    print(f"[AI Service] Attempt {attempt} failed on parallel chunk {chunk_file}: {chunk_error}")
+                    if attempt < max_retries:
+                        err_msg = str(chunk_error).lower()
+                        if "429" in err_msg or "quota" in err_msg or "rate limit" in err_msg:
+                            import random
+                            sleep_time = (40.0 * attempt) + random.uniform(5.0, 15.0)
+                            print(f"[AI Service] Quota limit / 429 hit. Sleeping/staggering for {sleep_time:.2f} seconds before retry...")
+                        else:
+                            sleep_time = retry_delay * (2 ** (attempt - 1))
+                            print(f"[AI Service] Retrying in {sleep_time} seconds...")
+                        time.sleep(sleep_time)
+
+                        
+            # Clean up chunk file if all retries failed
             if chunk_file != audio_path and os.path.exists(chunk_file):
                 try:
                     os.remove(chunk_file)
                 except Exception:
                     pass
+            raise Exception(f"Failed on chunk starting at {time_offset}s after {max_retries} attempts: {last_error}")
+
+        futures = {}
+        # run parallel chunk processing
+        with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
+            for idx, (chunk_file, time_offset) in enumerate(chunks):
+                if idx > 0:
+                    time.sleep(5.0)  # Pacing: wait 5s between initiating chunk requests to prevent API rate limits
+                future = executor.submit(process_chunk_parallel, idx, chunk_file, time_offset)
+                futures[future] = time_offset
+                
+            chunk_results = []
+            for future in concurrent.futures.as_completed(futures):
+                offset = futures[future]
+                try:
+                    res_subs = future.result()
+                    chunk_results.append((offset, res_subs))
+                except Exception as ex:
+                    print(f"[AI Service] Parallel transcription thread error: {ex}")
+                    return {"success": False, "error": str(ex)}
                     
+        # Sort chunks by start time offset to maintain sequence order
+        chunk_results.sort(key=lambda x: x[0])
+        
+        seg_counter = 0
+        for offset, res_subs in chunk_results:
+            for sub in res_subs:
+                sub["id"] = seg_counter
+                global_segments.append(sub)
+                seg_counter += 1
+                
+    else:
+        seg_counter = 0
+        global_speaker_profiles = {}  # maps speaker_id -> short vocal description & role
+        
+        for chunk_file, time_offset in chunks:
+            print(f"[AI Service] Processing chunk: {os.path.basename(chunk_file)} (Start offset: {time_offset} seconds)")
+            
+            # Build profiles context for prompt instruction continuity
+            profiles_context = ""
+            if global_speaker_profiles:
+                profiles_context = "\nHere are the speakers already identified in previous segments. Match the voices in this new segment to these profiles if they are the same voice:\n"
+                for spk_id, desc in global_speaker_profiles.items():
+                    profiles_context += f"- {spk_id}: {desc}\n"
+                    
+            source_context = ""
+            if source_lang and source_lang != "auto":
+                lang_names_full = {
+                    "zh": "Chinese",
+                    "en": "English",
+                    "ko": "Korean",
+                    "ja": "Japanese"
+                }
+                source_context = f"\nThe original spoken language of the audio is {lang_names_full.get(source_lang, source_lang)}."
+    
+            prompt_rules = f"""1. SEGMENTATION: Split the transcription into short, natural dialogue segments. Each segment should contain only 1 or 2 small clauses. You MUST include proper sentence punctuation (such as '.', '?', '!' or Chinese '。', '？', '！') in "original_text" to mark sentence endings clearly."""
+    
+            prompt_rules += f"""
+2. GENDER & SPEAKER CLASSIFICATION: Classify speaker gender as "male" or "female". Differentiate between distinct voices. Assign a unique "speaker_id" to each segment representing who is speaking.
+   {profiles_context}
+   If a voice matches an existing profile listed above, you MUST reuse that exact "speaker_id". If it is a new speaker, create a new ID.
+3. VOCAL DESCRIPTION: Provide a "vocal_description" (under 20 words describing pitch, tone, age, speed, or role)."""
+    
+            schema_gender = "male or female"
+            schema_spk = "male_1"
+            schema_desc = "short description of voice quality and conversation role"
+    
+            prompt = f"""
+You are an expert audio transcriber and subtitling specialist. Analyze this audio chunk and return a JSON array containing timestamps, original spoken text, and speaker details. DO NOT translate the text.
+{source_context}
+    
+CRITICAL RULES:
+{prompt_rules}
+    
+OUTPUT FORMAT:
+Return ONLY a valid JSON array of objects with the exact schema below. Do not include any HTML tags, conversational preamble, or markdown formatting blocks (such as ```json).
+    
+Schema:
+[
+  {{
+    "start": 0.00,
+    "end": 2.50,
+    "original_text": "text in original language",
+    "gender": "{schema_gender}",
+    "speaker_id": "{schema_spk}",
+    "vocal_description": "{schema_desc}"
+  }}
+]
+"""
+    
+            # API call with retries
+            max_retries = 3
+            retry_delay = 2.0
+            success_chunk = False
+            last_error = None
+            
+            try:
+                with open(chunk_file, "rb") as f:
+                    audio_data = f.read()
+            except Exception as read_err:
+                print(f"[AI Service] Failed to read audio chunk: {read_err}")
+                if chunk_file != audio_path and os.path.exists(chunk_file):
+                    try:
+                        os.remove(chunk_file)
+                    except Exception:
+                        pass
+                return {"success": False, "error": f"Failed to read audio chunk: {read_err}"}
+    
+            for attempt in range(1, max_retries + 1):
+                try:
+                    print(f"-- Sending generation request with audio chunk (Attempt {attempt}/{max_retries})...")
+                    response = generate_content_with_gemini_audio(
+                        model_name=gemini_model,
+                        prompt=prompt,
+                        chunk_file=chunk_file,
+                        audio_data=audio_data,
+                        gemini_key=gemini_key,
+                        gemini_api_endpoint=gemini_api_endpoint,
+                        timeout=600.0
+                    )
+                        
+                    content = response.text.strip()
+                    
+                    if content.startswith("```"):
+                        lines = content.split("\n")
+                        if lines[0].startswith("```"):
+                            lines = lines[1:]
+                        if lines[-1].startswith("```"):
+                            lines = lines[:-1]
+                        content = "\n".join(lines).strip()
+                        
+                    chunk_data = json.loads(content)
+                    
+                    for item in chunk_data:
+                        spk_id = item.get("speaker_id")
+                        vocal_desc = item.get("vocal_description", "")
+                        
+                        # Check and persist new speaker profiles
+                        if spk_id and vocal_desc and spk_id not in global_speaker_profiles:
+                            global_speaker_profiles[spk_id] = vocal_desc
+                            
+                        gender_val = "narration" if narration else item.get("gender", "female")
+                        spk_val = "narration" if narration else (spk_id or f"{gender_val}_1")
+                        
+                        # Construct chunk-relative item for post-processing
+                        global_segments.append({
+                            "id": len(global_segments),
+                            "start": float(item["start"]) + time_offset,
+                            "end": float(item["end"]) + time_offset,
+                            "original_text": item.get("original_text", "").strip(),
+                            "text": "",
+                            "gender": "narration" if narration else gender_val,
+                            "speaker_id": "narration" if narration else spk_val,
+                            "emotion": "neutral"
+                        })
+                    
+                    success_chunk = True
+                    break
+                    
+                except Exception as chunk_error:
+                    last_error = chunk_error
+                    print(f"[AI Service] Attempt {attempt} failed on chunk {chunk_file}: {chunk_error}")
+                    if attempt < max_retries:
+                        err_msg = str(chunk_error).lower()
+                        if "429" in err_msg or "quota" in err_msg or "rate limit" in err_msg:
+                            import random
+                            sleep_time = (40.0 * attempt) + random.uniform(5.0, 15.0)
+                            print(f"[AI Service] Quota limit / 429 hit. Sleeping/staggering for {sleep_time:.2f} seconds before retry...")
+                        else:
+                            sleep_time = retry_delay * (2 ** (attempt - 1))
+                            print(f"[AI Service] Retrying in {sleep_time} seconds...")
+                        time.sleep(sleep_time)
+
+            
+            # Clean up chunk file
+            if chunk_file != audio_path and os.path.exists(chunk_file):
+                try:
+                    os.remove(chunk_file)
+                except Exception:
+                    pass
+    
+            if not success_chunk:
+                return {"success": False, "error": f"Gemini API failed on chunk starting at {time_offset}s after {max_retries} attempts: {last_error}"}
+                    
+    # 2. Batch Translate the segments
+    if global_segments:
+        print(f"[AI Service] Translating {len(global_segments)} raw segments in batches of 150...")
+        batch_size = 150
+        for i in range(0, len(global_segments), batch_size):
+            batch = global_segments[i:i+batch_size]
+            print(f"-- Translating batch {i // batch_size + 1} ({len(batch)} segments)...")
+            translated_texts = translate_segments_batch(batch, gemini_key, gemini_model, target_lang_name, gemini_api_endpoint)
+            # Map back
+            for seg, text_val in zip(batch, translated_texts):
+                seg["text"] = text_val.strip()
+                seg["original_text"] = seg["original_text"].strip()
+                
+        # Split translated raw segments into subtitle lines
+        split_segments = []
+        seg_counter = 0
+        for raw_seg in global_segments:
+            subs = split_segment_by_sentences(raw_seg, max_words=10)
+            for sub in subs:
+                split_segments.append({
+                    "id": seg_counter,
+                    "start": sub["start"],
+                    "end": sub["end"],
+                    "original_text": sub["original_text"],
+                    "text": sub["text"],
+                    "gender": sub["gender"],
+                    "speaker_id": sub["speaker_id"],
+                    "emotion": sub["emotion"]
+                })
+                seg_counter += 1
+        global_segments = split_segments
+        print(f"[AI Service] Split {len(global_segments)} subtitle segments after translation.")
+
     return {
         "success": True,
         "segments": global_segments
@@ -318,13 +987,14 @@ def transcribe_and_translate(
     gemini_api_endpoint: Optional[str] = None,
     target_lang: str = "vi",
     whisper_model: str = "base",
-    source_lang: str = "auto"
+    source_lang: str = "auto",
+    narration: bool = False
 ) -> dict:
-    """Coordinates transcription and translation depending on chosen mode: Local or Gemini API."""
+    """Coordinates transcription and translation depending on chosen mode: Local, Hybrid or Gemini API."""
     if mode == "gemini":
-        return transcribe_with_gemini(audio_path, gemini_key, gemini_model, gemini_chunk_size, gemini_api_endpoint, target_lang, source_lang)
+        return transcribe_with_gemini(audio_path, gemini_key, gemini_model, gemini_chunk_size, gemini_api_endpoint, target_lang, source_lang, narration)
         
-    # Local mode (default faster-whisper + Google Translate API)
+    # Local or Hybrid mode (faster-whisper transcription)
     model = get_whisper_model(whisper_model)
     if not model:
         return {
@@ -333,7 +1003,7 @@ def transcribe_and_translate(
         }
         
     try:
-        print(f"[AI Service] Transcribing audio with local Whisper model '{whisper_model}' (source_lang: {source_lang})...")
+        print(f"[AI Service] Transcribing audio with local Whisper model '{whisper_model}' (source_lang: {source_lang}, mode: {mode})...")
         transcribe_kwargs = {"beam_size": 5}
         if source_lang and source_lang != "auto":
             transcribe_kwargs["language"] = source_lang
@@ -348,32 +1018,73 @@ def transcribe_and_translate(
             if not orig_text:
                 continue
                 
-            # Perform local segment splitting for overly long segments
-            divided_segments = split_long_segment(orig_text, float(seg.start), float(seg.end))
+            # Keep as unsplit raw segment for translation
+            translated_segments.append({
+                "id": len(translated_segments),
+                "start": float(seg.start),
+                "end": float(seg.end),
+                "original_text": orig_text,
+                "text": "",
+                "gender": "narration" if narration else "female",
+                "speaker_id": "narration" if narration else "female_1",
+                "emotion": "neutral"
+            })
             
-            for chunk in divided_segments:
-                chunk_text = chunk["text"]
-                translated_text = translate_text(chunk_text, target_lang=target_lang)
-                gender = guess_gender(translated_text)
-                
-                translated_segments.append({
-                    "id": len(translated_segments),
-                    "start": chunk["start"],
-                    "end": chunk["end"],
-                    "original_text": chunk_text,
-                    "text": translated_text,
-                    "gender": gender,
-                    "speaker_id": f"{gender}_1",
-                    "emotion": "neutral"
+        # Perform translations on raw segments first
+        if translated_segments:
+            if mode == "hybrid":
+                print(f"[AI Service] Translating {len(translated_segments)} raw segments using Gemini API in hybrid mode...")
+                lang_names = {
+                    "vi": "Vietnamese",
+                    "en": "English",
+                    "ko": "Korean",
+                    "zh": "Chinese",
+                    "ja": "Japanese"
+                }
+                target_lang_name = lang_names.get(target_lang, "Vietnamese")
+                batch_size = 150
+                for i in range(0, len(translated_segments), batch_size):
+                    batch = translated_segments[i:i+batch_size]
+                    print(f"-- Translating hybrid batch {i // batch_size + 1} ({len(batch)} segments)...")
+                    translated_texts = translate_segments_batch(batch, gemini_key, gemini_model, target_lang_name, gemini_api_endpoint)
+                    for seg, text_val in zip(batch, translated_texts):
+                        seg["text"] = text_val.strip()
+                print(f"[AI Service] Hybrid translation complete.")
+            else:
+                # Local translation mode
+                for seg in translated_segments:
+                    seg["text"] = translate_text(seg["original_text"], target_lang=target_lang)
+
+            # Resolve gender and speaker properties based on full translated text
+            for seg in translated_segments:
+                gender = "narration" if narration else guess_gender(seg["text"] or seg["original_text"])
+                seg["gender"] = gender
+                seg["speaker_id"] = "narration" if narration else f"{gender}_1"
+
+        # Apply splitting on raw segments AFTER translation is complete
+        split_segments = []
+        seg_counter = 0
+        for raw_seg in translated_segments:
+            subs = split_segment_by_sentences(raw_seg, max_words=10)
+            for sub in subs:
+                split_segments.append({
+                    "id": seg_counter,
+                    "start": sub["start"],
+                    "end": sub["end"],
+                    "original_text": sub["original_text"],
+                    "text": sub["text"],
+                    "gender": sub["gender"],
+                    "speaker_id": sub["speaker_id"],
+                    "emotion": sub["emotion"]
                 })
-            
+                seg_counter += 1
         return {
             "success": True,
-            "segments": translated_segments
+            "segments": split_segments
         }
         
     except Exception as e:
-        print(f"[AI Service] Error in local transcription/translation: {e}")
+        print(f"[AI Service] Error in local/hybrid transcription/translation: {e}")
         return {
             "success": False,
             "error": str(e)
@@ -399,9 +1110,14 @@ def save_segments_to_srt(segments: list, output_srt_path: str) -> None:
         best_space = min(spaces, key=lambda x: abs(x - mid))
         return text[:best_space] + "\n" + text[best_space+1:]
 
-    with open(output_srt_path, "w", encoding="utf-8") as f:
+    with open(output_srt_path, "w", encoding="utf-8-sig") as f:
         for idx, seg in enumerate(segments):
             f.write(f"{idx + 1}\n")
             f.write(f"{format_time(seg['start'])} --> {format_time(seg['end'])}\n")
-            wrapped = wrap_text_smart(seg.get('text', ''))
+            
+            raw_text = seg.get('text', '')
+            if raw_text:
+                raw_text = strip_trailing_punctuation(raw_text)
+            
+            wrapped = wrap_text_smart(raw_text)
             f.write(f"{wrapped}\n\n")

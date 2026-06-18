@@ -9,8 +9,10 @@ numpy
 soundfile
 torch
 omnivoice
-google-generativeai
+google-genai
 opencv-python
+demucs
+
 
 
 

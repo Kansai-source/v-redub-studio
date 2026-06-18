@@ -7,6 +7,11 @@ import uuid
 import threading
 import json
 import asyncio
+import shutil
+from concurrent.futures import ThreadPoolExecutor
+
+# Global thread pool for background tasks queue management
+executor = ThreadPoolExecutor(max_workers=2)
 
 # Add parent directory of backend folder to sys.path to enable backend module imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -19,11 +24,47 @@ from typing import List, Dict, Any, Optional
 from backend.config import TEMP_DIR, DOWNLOADS_DIR, OUTPUTS_DIR, PORT
 from backend.download_service import download_video
 from backend.video_service import extract_audio, process_video_effects
-from backend.ai_service import transcribe_and_translate, save_segments_to_srt
-from backend.tts_service import scan_available_voices, generate_voiceover, designer_generate_temp_voice
+from backend.ai_service import transcribe_and_translate, save_segments_to_srt, unload_whisper_model
+from backend.tts_service import scan_available_voices, generate_voiceover, designer_generate_temp_voice, unload_tts_model
 
 # Initialize FastAPI App
 app = FastAPI(title="Video Anti-Copyright & Dub Service")
+
+def start_cache_cleanup_thread():
+    """Starts a background daemon thread that runs segment cache cleanup periodically."""
+    def cleanup_loop():
+        while True:
+            try:
+                from backend.config import TEMP_DIR
+                segment_cache_dir = os.path.join(TEMP_DIR, "segment_cache")
+                if os.path.exists(segment_cache_dir):
+                    now = time.time()
+                    max_age_seconds = 24 * 3600 # 24 hours
+                    deleted_count = 0
+                    for filename in os.listdir(segment_cache_dir):
+                        filepath = os.path.join(segment_cache_dir, filename)
+                        if os.path.isfile(filepath):
+                            mtime = os.path.getmtime(filepath)
+                            if (now - mtime) > max_age_seconds:
+                                try:
+                                    os.remove(filepath)
+                                    deleted_count += 1
+                                except Exception as e:
+                                    print(f"[Cleanup] Failed to delete cache file {filepath}: {e}")
+                    if deleted_count > 0:
+                        print(f"[Cleanup] Automatically cleaned up {deleted_count} cached segment audio files older than 24 hours.")
+            except Exception as ex:
+                print(f"[Cleanup] Error in cleanup thread: {ex}")
+            time.sleep(3600) # Once every hour
+
+    cleanup_thread = threading.Thread(target=cleanup_loop, daemon=True)
+    cleanup_thread.start()
+    print("[Cleanup] Periodic cache cleanup daemon thread launched successfully.")
+
+@app.on_event("startup")
+def on_startup():
+    start_cache_cleanup_thread()
+
 
 # Setup CORS
 app.add_middleware(
@@ -49,6 +90,7 @@ class TranscribeRequest(BaseModel):
     target_lang: Optional[str] = "vi"
     whisper_model: Optional[str] = "base"
     source_lang: Optional[str] = "auto"
+    narration: Optional[bool] = False
 
 class VideoFilterOptions(BaseModel):
     zoom_level: float = 0.0
@@ -75,22 +117,48 @@ class VideoFilterOptions(BaseModel):
     rotate_angle: float = 0.0
     enable_dynamic_pan: bool = False
     clean_watermark: bool = False
+    clean_watermark_type: str = "strip"  # "strip" or "coordinate_box"
     watermark_crop_pct: float = 15.0
     watermark_cover_type: str = "blur"
     watermark_cover_path: Optional[str] = None
+    logo_x_pct: float = 0.85
+    logo_y_pct: float = 0.05
+    logo_w_pct: float = 0.12
+    logo_h_pct: float = 0.06
     enable_subtitles: bool = True
+    subtitle_color: str = "#FFFF00"
+    
+    # Custom outline / shadow style options
+    subtitle_outline_color: str = "#000000"
+    subtitle_outline_width: float = 2.0
+    subtitle_shadow_color: str = "#000000"
+    subtitle_shadow_depth: float = 1.0
+    subtitle_font_size: int = 20
+    subtitle_font_name: str = "Arial"
+
+    
+    # Glowing top title options (Reels style)
+    enable_title: bool = False
+    title_text: str = ""
+    title_color: str = "#00FF00"
+    title_font_size: int = 24
+    title_y_pct: float = 0.08
+
+
 
 class DubAndEditRequest(BaseModel):
     video_path: str
     segments: List[Dict[str, Any]]
     voice_definitions: Dict[str, str]
     video_options: VideoFilterOptions
+    target_lang: Optional[str] = "vi"
 
 class DesignerGenerateRequest(BaseModel):
     instruct: str
 
 class DesignerSaveRequest(BaseModel):
     name: str
+    gender: Optional[str] = "female"
 
 # ----------------- ROUTE IMPLEMENTATIONS -----------------
 
@@ -113,7 +181,7 @@ def get_voices():
     return {"voices": voices}
 
 @app.post("/api/upload-voice")
-async def upload_voice(file: UploadFile = File(...), name: str = Form(...)):
+async def upload_voice(file: UploadFile = File(...), name: str = Form(...), gender: str = Form("female")):
     """Receives and saves a WAV voice sample to Voice_ref directory."""
     try:
         # Standardize name for safer filename
@@ -127,8 +195,8 @@ async def upload_voice(file: UploadFile = File(...), name: str = Form(...)):
         # Ensure directory exists
         os.makedirs(DEFAULT_VOICE_REF_DIR, exist_ok=True)
         
-        # Target: name_voice.wav
-        target_path = os.path.join(DEFAULT_VOICE_REF_DIR, f"{clean_name}_voice.wav")
+        # Save gender as part of the filename: clean_name_gender_voice.wav
+        target_path = os.path.join(DEFAULT_VOICE_REF_DIR, f"{clean_name}_{gender}_voice.wav")
         print(f"[API] Saving uploaded voice file to: {target_path}")
         
         with open(target_path, "wb") as buffer:
@@ -198,8 +266,9 @@ def designer_save(req: DesignerSaveRequest):
         if not clean_name:
             raise HTTPException(400, "Tên giọng nói không hợp lệ.")
             
-        # Target path: name_synthetic.wav (to distinguish from _voice.wav uploads)
-        target_path = os.path.join(DEFAULT_VOICE_REF_DIR, f"{clean_name}_synthetic.wav")
+        # Target path: name_gender_synthetic.wav
+        gender = req.gender if req.gender else "female"
+        target_path = os.path.join(DEFAULT_VOICE_REF_DIR, f"{clean_name}_{gender}_synthetic.wav")
         os.makedirs(DEFAULT_VOICE_REF_DIR, exist_ok=True)
         
         shutil.copy2(temp_designer_file, target_path)
@@ -347,7 +416,7 @@ def run_download_worker(task_id: str, url: str):
             jobs[task_id]["message"] = f"Lỗi: {str(e)}"
             jobs[task_id]["error"] = str(e)
 
-def run_transcribe_worker(task_id: str, video_path: str, mode: str, gemini_key: str, gemini_model: str, gemini_chunk_size: float = 900.0, gemini_api_endpoint: Optional[str] = None, target_lang: str = "vi", whisper_model: str = "base", source_lang: str = "auto"):
+def run_transcribe_worker(task_id: str, video_path: str, mode: str, gemini_key: str, gemini_model: str, gemini_chunk_size: float = 900.0, gemini_api_endpoint: Optional[str] = None, target_lang: str = "vi", whisper_model: str = "base", source_lang: str = "auto", narration: bool = False):
     try:
         with jobs_lock:
             jobs[task_id] = {"status": "processing", "progress": 10, "message": "Kiểm tra tập tin âm thanh...", "result": None, "error": None}
@@ -376,11 +445,28 @@ def run_transcribe_worker(task_id: str, video_path: str, mode: str, gemini_key: 
             gemini_api_endpoint=gemini_api_endpoint,
             target_lang=target_lang,
             whisper_model=whisper_model,
-            source_lang=source_lang
+            source_lang=source_lang,
+            narration=narration
         )
         
         if not result.get("success"):
             raise Exception(f"Phiên âm thất bại: {result.get('error')}")
+            
+        # Run AI Vocal/BGM Separation in parallel/sequentially to cache separated audio streams
+        try:
+            with jobs_lock:
+                jobs[task_id]["progress"] = 85
+                jobs[task_id]["message"] = "Đang tách nguồn âm bằng AI (Vocal/BGM Separation)..."
+            from audio_separator import separate_vocals_bgm
+            sep_res = separate_vocals_bgm(video_path)
+            if sep_res["success"]:
+                result["separated_vocal_path"] = sep_res["vocal_path"]
+                result["separated_bgm_path"] = sep_res["bgm_path"]
+                print(f"[Worker] Separate BGM/Vocal success: {sep_res['vocal_path']}")
+            else:
+                print(f"[Worker] Separate BGM/Vocal skipped/failed: {sep_res['error']}")
+        except Exception as sep_err:
+            print(f"[Worker] Separate BGM/Vocal error: {sep_err}")
             
         with jobs_lock:
             jobs[task_id]["status"] = "completed"
@@ -395,14 +481,22 @@ def run_transcribe_worker(task_id: str, video_path: str, mode: str, gemini_key: 
             jobs[task_id]["message"] = f"Lỗi: {str(e)}"
             jobs[task_id]["error"] = str(e)
 
+
 def run_dub_and_edit_worker(
     task_id: str,
     video_path: str,
     segments: list,
     voice_definitions: dict,
-    video_options: dict
+    video_options: dict,
+    target_lang: str = "vi"
 ):
     try:
+        # Preserve punctuation in segments to allow sentence-level grouping.
+        # Punctuation is parsed for TTS, and stripped dynamically only when generating subtitles (SRT).
+        for seg in segments:
+            if "text" in seg and seg["text"]:
+                seg["text"] = seg["text"].strip()
+
         with jobs_lock:
             jobs[task_id] = {"status": "processing", "progress": 10, "message": "Khởi chạy xuất video lồng tiếng...", "result": None, "error": None}
             
@@ -437,15 +531,82 @@ def run_dub_and_edit_worker(
         tts_success = False
         enable_dubbing = video_options.get("enable_dubbing", True)
         if enable_dubbing:
-            with jobs_lock:
-                jobs[task_id]["progress"] = 35
-                jobs[task_id]["message"] = "Đang sinh giọng thuyết minh tích hợp AI..."
-            tts_success = generate_voiceover(
-                segments=segments,
-                voice_definitions=voice_definitions,
-                total_duration=duration,
-                output_audio_path=output_audio_path
-            )
+            # Implement cache check for synthesized audio to prevent wasting time on visual/style updates
+            try:
+                import hashlib
+                import json
+                
+                stable_data = {
+                    "cache_version": "v5",
+                    "seed": "derived",
+                    "target_lang": target_lang,
+                    "segments": [
+                        {
+                            "id": s.get("id"),
+                            "text": s.get("text", "").strip(),
+                            "start": s.get("start"),
+                            "end": s.get("end"),
+                            "speaker_id": s.get("speaker_id"),
+                            "gender": s.get("gender"),
+                            "emotion": s.get("emotion", "neutral")
+                        }
+                        for s in segments
+                    ],
+                    "voice_definitions": voice_definitions,
+                    "voice_mtimes": {}
+                }
+                
+                try:
+                    from backend.tts_service import scan_available_voices
+                    available_voices = {v["id"]: v for v in scan_available_voices()}
+                    for voice_id in voice_definitions.values():
+                        v_meta = available_voices.get(voice_id)
+                        if v_meta and v_meta.get("type") == "clone":
+                            fpath = v_meta.get("file_path")
+                            if fpath and os.path.exists(fpath):
+                                stable_data["voice_mtimes"][voice_id] = os.path.getmtime(fpath)
+                except Exception as e:
+                    print(f"[Worker] Error checking voice mtimes for cache key: {e}")
+                    
+                serialized = json.dumps(stable_data, sort_keys=True)
+                cache_md5 = hashlib.md5(serialized.encode("utf-8")).hexdigest()
+                segment_cache_dir = os.path.join(TEMP_DIR, "segment_cache")
+                os.makedirs(segment_cache_dir, exist_ok=True)
+                cached_wav_path = os.path.join(segment_cache_dir, f"tts_cache_{cache_md5}.wav")
+                
+                if os.path.exists(cached_wav_path):
+                    print(f"[Worker] Reusing cached voiceover audio file: {cached_wav_path}")
+                    with jobs_lock:
+                        jobs[task_id]["progress"] = 35
+                        jobs[task_id]["message"] = "Tái sử dụng giọng lồng tiếng từ bộ nhớ đệm (Cache hit)..."
+                    shutil.copy2(cached_wav_path, output_audio_path)
+                    tts_success = True
+                else:
+                    with jobs_lock:
+                        jobs[task_id]["progress"] = 35
+                        jobs[task_id]["message"] = "Đang sinh giọng thuyết minh tích hợp AI..."
+                    tts_success = generate_voiceover(
+                        segments=segments,
+                        voice_definitions=voice_definitions,
+                        total_duration=duration,
+                        output_audio_path=output_audio_path,
+                        target_lang=target_lang
+                    )
+                    if tts_success and os.path.exists(output_audio_path):
+                        shutil.copy2(output_audio_path, cached_wav_path)
+                        print(f"[Worker] Cached newly generated voiceover audio file: {cached_wav_path}")
+            except Exception as cache_err:
+                print(f"[Worker] TTS Cache failed/skipped: {cache_err}")
+                with jobs_lock:
+                    jobs[task_id]["progress"] = 35
+                    jobs[task_id]["message"] = "Đang sinh giọng thuyết minh tích hợp AI..."
+                tts_success = generate_voiceover(
+                    segments=segments,
+                    voice_definitions=voice_definitions,
+                    total_duration=duration,
+                    output_audio_path=output_audio_path,
+                    target_lang=target_lang
+                )
         else:
             with jobs_lock:
                 jobs[task_id]["progress"] = 35
@@ -462,6 +623,18 @@ def run_dub_and_edit_worker(
             options_dict["srt_path"] = output_srt_path
         if tts_success and os.path.exists(output_audio_path):
             options_dict["tts_audio_path"] = output_audio_path
+            
+        # Try to pull AI separated BGM/Vocal tracks from cache
+        try:
+            from audio_separator import separate_vocals_bgm
+            sep_res = separate_vocals_bgm(video_path)
+            if sep_res["success"]:
+                options_dict["separated_bgm_path"] = sep_res["bgm_path"]
+                options_dict["separated_vocal_path"] = sep_res["vocal_path"]
+                print(f"[Worker] Mixing with separated BGM and Vocal tracks from AI cache.")
+        except Exception as sep_err:
+            print(f"[Worker] Could not pull separated tracks from cache: {sep_err}")
+
             
         with jobs_lock:
             jobs[task_id]["progress"] = 85
@@ -515,40 +688,75 @@ def api_download(req: DownloadRequest):
         raise HTTPException(400, "URL cannot be empty")
         
     task_id = str(uuid.uuid4())
-    # Start thread
-    t = threading.Thread(target=run_download_worker, args=(task_id, url))
-    t.daemon = True
-    t.start()
+    # Initialize task state with status 'pending' to prevent SSE 404s before thread starts
+    with jobs_lock:
+        jobs[task_id] = {
+            "status": "pending",
+            "progress": 0,
+            "message": "Đang xếp hàng chờ xử lý...",
+            "result": None,
+            "error": None
+        }
+    executor.submit(run_download_worker, task_id, url)
     return {"success": True, "task_id": task_id}
 
 @app.post("/api/transcribe")
 def api_transcribe(req: TranscribeRequest):
     """Submits transcription request as background task."""
     task_id = str(uuid.uuid4())
-    # Start thread
-    t = threading.Thread(
-        target=run_transcribe_worker,
-        args=(task_id, req.file_path, req.mode, req.gemini_key, req.gemini_model, req.gemini_chunk_size, req.gemini_api_endpoint, req.target_lang, req.whisper_model, req.source_lang)
+    # Initialize task state with status 'pending' to prevent SSE 404s before thread starts
+    with jobs_lock:
+        jobs[task_id] = {
+            "status": "pending",
+            "progress": 0,
+            "message": "Đang xếp hàng chờ xử lý...",
+            "result": None,
+            "error": None
+        }
+    executor.submit(
+        run_transcribe_worker,
+        task_id, req.file_path, req.mode, req.gemini_key, req.gemini_model, req.gemini_chunk_size, req.gemini_api_endpoint, req.target_lang, req.whisper_model, req.source_lang, req.narration
     )
-    t.daemon = True
-    t.start()
     return {"success": True, "task_id": task_id}
 
 @app.post("/api/dub-and-edit")
 def api_dub_and_edit(req: DubAndEditRequest):
     """Submits video render and dub request as background task."""
     video_path = req.video_path
+    
+    # Debug payload logger
+    try:
+        payload_data = {
+            "video_path": req.video_path,
+            "voice_definitions": req.voice_definitions,
+            "segments": req.segments,
+            "video_options": req.video_options.dict(),
+            "target_lang": req.target_lang
+        }
+        payload_dump_path = os.path.join(TEMP_DIR, "last_dub_payload.json")
+        with open(payload_dump_path, "w", encoding="utf-8") as f:
+            json.dump(payload_data, f, ensure_ascii=False, indent=2)
+        print(f"[API] Logged last dub payload to {payload_dump_path}")
+    except Exception as dump_err:
+        print(f"[API] Error dumping request payload: {dump_err}")
+
     if not os.path.exists(video_path):
         raise HTTPException(404, "Original video file not found")
         
     task_id = str(uuid.uuid4())
-    # Start thread
-    t = threading.Thread(
-        target=run_dub_and_edit_worker,
-        args=(task_id, video_path, req.segments, req.voice_definitions, req.video_options.dict())
+    # Initialize task state with status 'pending' to prevent SSE 404s before thread starts
+    with jobs_lock:
+        jobs[task_id] = {
+            "status": "pending",
+            "progress": 0,
+            "message": "Đang xếp hàng chờ xử lý...",
+            "result": None,
+            "error": None
+        }
+    executor.submit(
+        run_dub_and_edit_worker,
+        task_id, video_path, req.segments, req.voice_definitions, req.video_options.dict(), req.target_lang
     )
-    t.daemon = True
-    t.start()
     return {"success": True, "task_id": task_id}
 
 @app.get("/api/tasks/{task_id}/progress")
@@ -593,6 +801,17 @@ async def task_progress_stream(task_id: str):
             await asyncio.sleep(0.5)
             
     return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+@app.post("/api/utils/unload-models")
+def api_unload_models():
+    """Triggers model unloading to release VRAM memory."""
+    try:
+        unload_whisper_model()
+        unload_tts_model()
+        return {"success": True, "message": "Đã giải phóng VRAM thành công!"}
+    except Exception as e:
+        print(f"[API] Error in unload-models: {e}")
+        raise HTTPException(500, f"Error releasing VRAM: {str(e)}")
 
 # ----------------- VIDEO PREVIEW STREAMING -----------------
 
@@ -641,20 +860,35 @@ def get_file_content(path: str, range_header: str = None):
 @app.get("/api/download-file/{filename}")
 def serve_video_preview(filename: str, range: Optional[str] = None):
     """Serves video files from downloads or outputs folders with seek support."""
-    # Search local folders
-    file_path = os.path.join(OUTPUTS_DIR, filename)
+    # Prevent path traversal by extracting only the base file name
+    clean_filename = os.path.basename(filename)
+    
+    # Resolve absolute paths and boundaries
+    abs_outputs_dir = os.path.abspath(OUTPUTS_DIR)
+    abs_downloads_dir = os.path.abspath(DOWNLOADS_DIR)
+    
+    file_path = os.path.abspath(os.path.join(OUTPUTS_DIR, clean_filename))
     if not os.path.exists(file_path):
-        file_path = os.path.join(DOWNLOADS_DIR, filename)
+        file_path = os.path.abspath(os.path.join(DOWNLOADS_DIR, clean_filename))
         
-    if not os.path.exists(file_path):
+    # Boundary check to ensure the file path is within allowed directories
+    if not (file_path.startswith(abs_outputs_dir) or file_path.startswith(abs_downloads_dir)):
+        raise HTTPException(400, "Truy cập tệp tin không hợp lệ.")
+        
+    if not os.path.exists(file_path) or not os.path.isfile(file_path):
         raise HTTPException(404, f"Requested video file {filename} could not be located.")
         
+    import mimetypes
+    mime_type, _ = mimetypes.guess_type(file_path)
+    
     # Stream with range header logic if requested
     if range:
         iterator, headers, status = get_file_content(file_path, range)
+        if mime_type and mime_type.startswith("image/"):
+            return FileResponse(file_path, media_type=mime_type)
         return StreamingResponse(iterator(), status_code=status, headers=headers)
         
-    return FileResponse(file_path, media_type="video/mp4")
+    return FileResponse(file_path, media_type=mime_type or "application/octet-stream")
 
 @app.get("/api/models")
 def api_models(gemini_key: str, gemini_api_endpoint: Optional[str] = None):
@@ -662,18 +896,17 @@ def api_models(gemini_key: str, gemini_api_endpoint: Optional[str] = None):
     if not gemini_key:
         return {"success": False, "error": "Gemini API key is required"}
     try:
-        import google.generativeai as genai
+        from google import genai
         client_options = {}
         if gemini_api_endpoint:
-            clean_endpoint = gemini_api_endpoint.replace("https://", "").replace("http://", "").rstrip("/")
-            client_options['api_endpoint'] = clean_endpoint
+            url = gemini_api_endpoint.strip()
+            if not url.startswith("http://") and not url.startswith("https://"):
+                url = "https://" + url
+            client_options['http_options'] = {'base_url': url.rstrip("/")}
             
-        if client_options:
-            genai.configure(api_key=gemini_key, client_options=client_options, transport="rest")
-        else:
-            genai.configure(api_key=gemini_key)
+        client = genai.Client(api_key=gemini_key, **client_options)
         models = []
-        for m in genai.list_models(request_options={"timeout": 10.0}):
+        for m in client.models.list():
             # Get clean name (strip models/)
             clean_name = m.name.replace("models/", "")
             models.append(clean_name)

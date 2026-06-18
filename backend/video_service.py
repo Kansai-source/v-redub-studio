@@ -6,6 +6,7 @@ from backend.config import TEMP_DIR, OUTPUTS_DIR
 
 def run_ffmpeg_cmd(cmd_args: list, cwd: str = None) -> bool:
     """Invokes ffmpeg with given arguments and handles process execution."""
+    import tempfile
     # Ensure ffmpeg uses the correct path on Windows if specified in PATH
     print(f"[FFmpeg] Running command: ffmpeg " + " ".join(shlex.quote(x) for x in cmd_args))
     try:
@@ -16,19 +17,23 @@ def run_ffmpeg_cmd(cmd_args: list, cwd: str = None) -> bool:
             startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
             startupinfo.wShowWindow = 0 # SW_HIDE
 
-        process = subprocess.run(
-            ["ffmpeg", "-y"] + cmd_args,
-            cwd=cwd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            startupinfo=startupinfo
-        )
-        
-        if process.returncode != 0:
-            print(f"[FFmpeg Error] stderr: {process.stderr}")
-            return False
-        return True
+        # Redirect standard streams to prevent subprocess buffer deadlocks,
+        # since ffmpeg output can exceed 64KB on long video transcodes.
+        with tempfile.TemporaryFile(mode='w+', encoding='utf-8') as log_file:
+            process = subprocess.run(
+                ["ffmpeg", "-y"] + cmd_args,
+                cwd=cwd,
+                stdout=subprocess.DEVNULL,
+                stderr=log_file,
+                startupinfo=startupinfo
+            )
+            
+            if process.returncode != 0:
+                log_file.seek(0)
+                err_logs = log_file.read()
+                print(f"[FFmpeg Error] stderr logs:\n{err_logs}")
+                return False
+            return True
     except Exception as e:
         print(f"[FFmpeg Exception] {e}")
         return False
@@ -44,6 +49,59 @@ def extract_audio(video_path: str, output_audio_path: str) -> bool:
         output_audio_path
     ]
     return run_ffmpeg_cmd(args)
+
+def get_video_height(video_path: str) -> int:
+    """Probes the video file using ffprobe to get its height (resolution) on Windows/Linux."""
+    try:
+        cmd = [
+            "ffprobe", "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=height",
+            "-of", "csv=s=x:p=0",
+            video_path
+        ]
+        startupinfo = None
+        import sys
+        if sys.platform == "win32":
+            import subprocess
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = 0 # SW_HIDE
+
+        process = subprocess.run(cmd, capture_output=True, text=True, startupinfo=startupinfo)
+        if process.returncode == 0:
+            out = process.stdout.strip()
+            first_line = out.split('\n')[0].strip()
+            if first_line.isdigit():
+                return int(first_line)
+    except Exception as e:
+        print(f"[ffprobe height probe exception] {e}")
+    return 720  # default fallback
+
+def hex_to_ass_color(hex_str: str, default: str = "&H00FFFF", alpha_prefix: str = "00") -> str:
+    """Converts HTML hex color codes (#RRGGBB) to ASS color format (&H[AA][BB][GG][RR])."""
+    if not hex_str:
+        return default
+    hex_str = hex_str.strip().lstrip('#')
+    if len(hex_str) == 6:
+        r, g, b = hex_str[0:2], hex_str[2:4], hex_str[4:6]
+        return f"&H{alpha_prefix}{b}{g}{r}"
+    elif len(hex_str) == 8:
+        r, g, b = hex_str[0:2], hex_str[2:4], hex_str[4:6]
+        return f"&H{alpha_prefix}{b}{g}{r}"
+    return default
+
+def escape_ffmpeg_drawtext(text: str) -> str:
+    """Escapes special characters in text for FFmpeg's drawtext filter."""
+    if not text:
+        return ""
+    # Support both typed \n/\\n and literal newlines as multi-line drawtext wraps
+    text = text.replace('\\n', '\n').replace('\\N', '\n')
+    res = text.replace('\\', '\\\\')
+    res = res.replace("'", "'\\\\''")
+    res = res.replace(':', '\\:')
+    res = res.replace('%', '\\%')
+    return res
 
 def process_video_effects(
     input_video_path: str,
@@ -93,26 +151,15 @@ def process_video_effects(
     
     srt_path = options.get("srt_path", None)          # Path to SRT subtitles
     tts_audio_path = options.get("tts_audio_path", None)  # Path to dubbed audio
+    separated_bgm_path = options.get("separated_bgm_path", None)
+    separated_vocal_path = options.get("separated_vocal_path", None)
     
     enable_ducking = bool(options.get("enable_ducking", False))
     ducking_volume = float(options.get("ducking_volume", 0.15))
     original_vol = float(options.get("original_audio_vol", 0.15))
     tts_vol = float(options.get("tts_audio_vol", 1.0))           # Dubbed vol
     
-    # Determine the original audio track volume filter expression
-    orig_audio_filter_expr = f"{original_vol}"
-    if enable_ducking and segments:
-        conditions = []
-        for seg in segments:
-            start = float(seg.get("start", 0.0))
-            end = float(seg.get("end", 0.0))
-            if end > start:
-                conditions.append(f"between(t,{start:.3f},{end:.3f})")
-        if conditions:
-            # If speaking, lower to ducking_volume, otherwise keep original_vol (defaults to 1.0 if not specified, 
-            # but here original_vol is either preset or custom user volume)
-            orig_audio_filter_expr = f"if({'+'.join(conditions)},{ducking_volume:.3f},{original_vol:.3f})"
-            print(f"[FFmpeg] Auto-Ducking active. Envelope: volume='{orig_audio_filter_expr}'")
+    # Auto-Ducking is resolved via sidechaincompress on the complex main mix for efficiency
 
     speed = float(options.get("speed", 1.0))
     aspect_ratio_mode = options.get("aspect_ratio_mode", "original")
@@ -135,65 +182,6 @@ def process_video_effects(
     if hflip:
         next_v_link = f"[{v_prefix}_hflip]"
         vf_list.append(f"{current_v_link}hflip{next_v_link}")
-        current_v_link = next_v_link
-
-    # Watermark Crop & Blur Strip (Top/Bottom border blur, or custom image/video banner)
-    clean_watermark = bool(options.get("clean_watermark", False))
-    watermark_crop_pct = float(options.get("watermark_crop_pct", 15.0))
-    watermark_cover_type = options.get("watermark_cover_type", "blur")
-    watermark_cover_path = options.get("watermark_cover_path", None)
-    
-    # Check if a custom cover is actually available on disk
-    is_custom_cover_available = False
-    if clean_watermark and watermark_crop_pct > 0 and watermark_cover_type != "blur" and watermark_cover_path:
-        is_custom_cover_available = os.path.exists(watermark_cover_path)
-
-    # Determine input index for the cover stream
-    cover_input_idx = None
-    if is_custom_cover_available:
-        cover_input_idx = 1
-        if tts_audio_path and os.path.exists(tts_audio_path):
-            cover_input_idx = 2
-
-    if clean_watermark and watermark_crop_pct > 0:
-        crop_h_expr = f"ih*{watermark_crop_pct/100:.4f}"
-        next_v_link = f"[{v_prefix}_wm]"
-        
-        if is_custom_cover_available and cover_input_idx is not None:
-            # Custom Banner Image or Video
-            if zoom_align == "top": # Watermark is at bottom
-                drawbox_y = f"ih-{crop_h_expr}"
-                overlay_y = "H-h"
-            else: # Watermark is at top
-                drawbox_y = "0"
-                overlay_y = "0"
-                
-            wm_filter = (
-                f"{current_v_link}drawbox=x=0:y={drawbox_y}:w=iw:h={crop_h_expr}:color=black:t=fill[{v_prefix}_blacked]; "
-                f"[{cover_input_idx}:v][{v_prefix}_blacked]scale2ref=w=iw:h=ih*{watermark_crop_pct/100:.4f}[{v_prefix}_cov_sc][{v_prefix}_ref]; "
-                f"[{v_prefix}_ref][{v_prefix}_cov_sc]overlay=0:{overlay_y}:shortest=1{next_v_link}"
-            )
-            print(f"[FFmpeg] Custom Watermark Cover active. Type: {watermark_cover_type}, Path: {watermark_cover_path}")
-        else:
-            # Standard Blur Cover
-            if zoom_align == "top": # Shave bottom -> crop bottom, insert blur at bottom
-                wm_filter = (
-                    f"{current_v_link}split[{v_prefix}_orig][{v_prefix}_bg]; "
-                    f"[{v_prefix}_bg]boxblur=30:10[{v_prefix}_bgblur]; "
-                    f"[{v_prefix}_orig]crop=iw:ih-{crop_h_expr}:0:0[{v_prefix}_fg]; "
-                    f"[{v_prefix}_bgblur][{v_prefix}_fg]overlay=0:0{next_v_link}"
-                )
-            else: # Shave top -> crop top, insert blur at top
-                overlay_y_expr = f"H*{watermark_crop_pct/100:.4f}"
-                wm_filter = (
-                    f"{current_v_link}split[{v_prefix}_orig][{v_prefix}_bg]; "
-                    f"[{v_prefix}_bg]boxblur=30:10[{v_prefix}_bgblur]; "
-                    f"[{v_prefix}_orig]crop=iw:ih-{crop_h_expr}:0:{crop_h_expr}[{v_prefix}_fg]; "
-                    f"[{v_prefix}_bgblur][{v_prefix}_fg]overlay=0:{overlay_y_expr}{next_v_link}"
-                )
-            print(f"[FFmpeg] Gaussian Blur Cover applied to watermark region.")
-            
-        vf_list.append(wm_filter)
         current_v_link = next_v_link
 
     # Anti-copyright: Micro-rotation
@@ -239,9 +227,9 @@ def process_video_effects(
             
         next_v_link = f"[{v_prefix}_reframe]"
         blur_filter = (
-            f"{current_v_link}split[{v_prefix}_as_orig][{v_prefix}_as_bg]; "
-            f"[{v_prefix}_as_bg]scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,boxblur=20:10[{v_prefix}_as_bgblur]; "
-            f"[{v_prefix}_as_orig]{fg_crop}scale=720:-1[{v_prefix}_as_fg]; "
+            f"color=c=black:s=720x1280[{v_prefix}_as_bg]; "
+            f"[{v_prefix}_as_bg]boxblur=30:10[{v_prefix}_as_bgblur]; "
+            f"{current_v_link}{fg_crop}scale=720:-1[{v_prefix}_as_fg]; "
             f"[{v_prefix}_as_bgblur][{v_prefix}_as_fg]overlay=(W-w)/2:(H-h)/2{next_v_link}"
         )
         vf_list.append(blur_filter)
@@ -260,10 +248,9 @@ def process_video_effects(
             
         next_v_link = f"[{v_prefix}_reframe]"
         black_filter = (
-            f"{current_v_link}split[{v_prefix}_as_orig][{v_prefix}_as_bg_dum]; "
             f"color=c=black:s=720x1280[{v_prefix}_as_bg]; "
-            f"[{v_prefix}_as_orig]{fg_crop}scale=720:-1[{v_prefix}_as_fg]; "
-            f"[{v_prefix}_as_bg][{v_prefix}_as_fg]overlay=(W-w)/2:(H-h)/2{next_v_link}"
+            f"{current_v_link}{fg_crop}scale=720:-1[{v_prefix}_as_fg]; "
+            f"[{v_prefix}_as_bg][{v_prefix}_as_fg]overlay=(W-w)/2:(H-h)/2:shortest=1{next_v_link}"
         )
         vf_list.append(black_filter)
         current_v_link = next_v_link
@@ -280,6 +267,111 @@ def process_video_effects(
             else:
                 vf_list.append(f"{current_v_link}crop=iw*{crop_factor}:ih*{crop_factor},scale=iw:ih{next_v_link}")
             current_v_link = next_v_link
+
+    # Watermark Crop & Blur Strip / Logo Coordinate Box Cover (Executed after reframe to align coordinates)
+    clean_watermark = bool(options.get("clean_watermark", False))
+    clean_watermark_type = options.get("clean_watermark_type", "strip")
+    watermark_crop_pct = float(options.get("watermark_crop_pct", 15.0))
+    watermark_cover_type = options.get("watermark_cover_type", "blur")
+    watermark_cover_path = options.get("watermark_cover_path", None)
+    
+    logo_x_pct = float(options.get("logo_x_pct", 0.85))
+    logo_y_pct = float(options.get("logo_y_pct", 0.05))
+    logo_w_pct = float(options.get("logo_w_pct", 0.12))
+    logo_h_pct = float(options.get("logo_h_pct", 0.06))
+    
+    # If video is flipped horizontally, the target watermark coordinates will also be mirrored horizontally
+    effective_logo_x_pct = 1.0 - logo_x_pct - logo_w_pct if hflip else logo_x_pct
+    
+    # Check if a custom cover is actually available on disk
+    is_custom_cover_available = False
+    if clean_watermark and watermark_cover_path:
+        is_custom_cover_available = os.path.exists(watermark_cover_path)
+
+    # Dynamic Input Index Resolver
+    input_idx_tracker = 1 # [0] is always original video
+    
+    tts_input_idx = None
+    if tts_audio_path and os.path.exists(tts_audio_path):
+        tts_input_idx = input_idx_tracker
+        input_idx_tracker += 1
+        
+    bgm_input_idx = None
+    if separated_bgm_path and os.path.exists(separated_bgm_path):
+        bgm_input_idx = input_idx_tracker
+        input_idx_tracker += 1
+        
+    vocal_input_idx = None
+    if separated_vocal_path and os.path.exists(separated_vocal_path):
+        vocal_input_idx = input_idx_tracker
+        input_idx_tracker += 1
+        
+    cover_input_idx = None
+    if is_custom_cover_available:
+        cover_input_idx = input_idx_tracker
+        input_idx_tracker += 1
+
+    if clean_watermark:
+        next_v_link = f"[{v_prefix}_wm]"
+        if clean_watermark_type == "coordinate_box":
+            if is_custom_cover_available and cover_input_idx is not None:
+                # Custom logo overlay scaled and positioned at blacked-out coordinate box
+                wm_filter = (
+                    f"{current_v_link}drawbox=x=iw*{effective_logo_x_pct:.4f}:y=ih*{logo_y_pct:.4f}:w=iw*{logo_w_pct:.4f}:h=ih*{logo_h_pct:.4f}:color=black:t=fill[{v_prefix}_blacked]; "
+                    f"[{cover_input_idx}:v][{v_prefix}_blacked]scale2ref=w=rw*{logo_w_pct:.4f}:h=rh*{logo_h_pct:.4f}[{v_prefix}_cov_sc][{v_prefix}_ref]; "
+                    f"[{v_prefix}_ref][{v_prefix}_cov_sc]overlay=x=W*{effective_logo_x_pct:.4f}:y=H*{logo_y_pct:.4f}:shortest=1{next_v_link}"
+                )
+                print(f"[FFmpeg] Custom Logo Cover applied at blacked-out coordinate box ({effective_logo_x_pct}, {logo_y_pct}, {logo_w_pct}, {logo_h_pct})")
+            else:
+                # Localised Box Blur applied at coordinate box
+                wm_filter = (
+                    f"{current_v_link}split[{v_prefix}_orig][{v_prefix}_patch]; "
+                    f"[{v_prefix}_patch]crop=w=iw*{logo_w_pct:.4f}:h=ih*{logo_h_pct:.4f}:x=iw*{effective_logo_x_pct:.4f}:y=ih*{logo_y_pct:.4f},boxblur=20:10[{v_prefix}_blurred]; "
+                    f"[{v_prefix}_orig][{v_prefix}_blurred]overlay=x=W*{effective_logo_x_pct:.4f}:y=H*{logo_y_pct:.4f}{next_v_link}"
+                )
+                print(f"[FFmpeg] Localised Box Blur applied at coordinate box ({effective_logo_x_pct}, {logo_y_pct}, {logo_w_pct}, {logo_h_pct})")
+        else:
+            # Traditional horizontal strip
+            if watermark_crop_pct > 0:
+                crop_h_expr = f"ih*{watermark_crop_pct/100:.4f}"
+                if is_custom_cover_available and cover_input_idx is not None:
+                    # Custom Banner Image or Video
+                    if zoom_align == "top": # Watermark is at bottom
+                        drawbox_y = f"ih-{crop_h_expr}"
+                        overlay_y = "H-h"
+                    else: # Watermark is at top
+                        drawbox_y = "0"
+                        overlay_y = "0"
+                        
+                    wm_filter = (
+                        f"{current_v_link}drawbox=x=0:y={drawbox_y}:w=iw:h={crop_h_expr}:color=black:t=fill[{v_prefix}_blacked]; "
+                        f"[{cover_input_idx}:v][{v_prefix}_blacked]scale2ref=w=rw:h=rh*{watermark_crop_pct/100:.4f}[{v_prefix}_cov_sc][{v_prefix}_ref]; "
+                        f"[{v_prefix}_ref][{v_prefix}_cov_sc]overlay=0:{overlay_y}:shortest=1{next_v_link}"
+                    )
+                    print(f"[FFmpeg] Custom Watermark Cover active. Type: {watermark_cover_type}, Path: {watermark_cover_path}")
+                else:
+                    # Standard Blur Cover
+                    if zoom_align == "top": # Shave bottom -> crop bottom, insert blur at bottom
+                        wm_filter = (
+                            f"{current_v_link}split[{v_prefix}_orig][{v_prefix}_bg]; "
+                            f"[{v_prefix}_bg]boxblur=30:10[{v_prefix}_bgblur]; "
+                            f"[{v_prefix}_orig]crop=iw:ih-{crop_h_expr}:0:0[{v_prefix}_fg]; "
+                            f"[{v_prefix}_bgblur][{v_prefix}_fg]overlay=0:0{next_v_link}"
+                        )
+                    else: # Shave top -> crop top, insert blur at top
+                        overlay_y_expr = f"H*{watermark_crop_pct/100:.4f}"
+                        wm_filter = (
+                            f"{current_v_link}split[{v_prefix}_orig][{v_prefix}_bg]; "
+                            f"[{v_prefix}_bg]boxblur=30:10[{v_prefix}_bgblur]; "
+                            f"[{v_prefix}_orig]crop=iw:ih-{crop_h_expr}:0:{crop_h_expr}[{v_prefix}_fg]; "
+                            f"[{v_prefix}_bgblur][{v_prefix}_fg]overlay=0:{overlay_y_expr}{next_v_link}"
+                        )
+                    print(f"[FFmpeg] Gaussian Blur Cover applied to watermark region.")
+            else:
+                wm_filter = f"{current_v_link}null{next_v_link}"
+                
+        vf_list.append(wm_filter)
+        current_v_link = next_v_link
 
     # 2c. Subtitle Cover-up (drawbox) applied on final layout
     if cover_sub:
@@ -313,22 +405,30 @@ def process_video_effects(
                     end = float(seg.get("end", 0.0))
                     if end > start:
                         overlay_conds.append(f"between(t,{start:.3f},{end:.3f})")
-            overlay_enable = f":enable='{'+'.join(overlay_conds)}'" if overlay_conds else ""
+            
+            # Fallback to permanent cover if segments are too many to prevent FFmpeg memory limits
+            if len(overlay_conds) > 60:
+                overlay_enable = ""
+                print(f"[FFmpeg] Gaussian Blur Cover active permanently due to high segment count ({len(overlay_conds)}) to prevent memory limits.")
+            else:
+                overlay_enable = f":enable='{'+'.join(overlay_conds)}'" if overlay_conds else ""
             
             next_v_link = f"[{v_prefix}_sub_cover]"
+            crop_y_expr = f"ih*{cover_y_pct:.4f}-{extra_h}"
+            overlay_y_expr = f"H*{cover_y_pct:.4f}-{extra_h}"
             blur_filter = (
                 f"{current_v_link}split[{v_prefix}_sub_orig][{v_prefix}_sub_bg]; "
-                f"[{v_prefix}_sub_bg]crop=w=iw*{cover_w_pct:.4f}:h={estimated_h}:x=iw*{cover_x_pct:.4f}:y=max(0\\,{drawbox_y_expr}),"
+                f"[{v_prefix}_sub_bg]crop=w=iw*{cover_w_pct:.4f}:h={estimated_h}:x=iw*{cover_x_pct:.4f}:y=max(0\\,{crop_y_expr}),"
                 f"boxblur=25:5[{v_prefix}_sub_bgblur]; "
-                f"[{v_prefix}_sub_orig][{v_prefix}_sub_bgblur]overlay=x=iw*{cover_x_pct:.4f}:y='max(0\\,{drawbox_y_expr})'{overlay_enable}{next_v_link}"
+                f"[{v_prefix}_sub_orig][{v_prefix}_sub_bgblur]overlay=x=W*{cover_x_pct:.4f}:y='max(0\\,{overlay_y_expr})'{overlay_enable}{next_v_link}"
             )
             vf_list.append(blur_filter)
             current_v_link = next_v_link
             print(f"[FFmpeg] Gaussian Blur Cover applied to sub region with height={estimated_h}px.")
         else:
             ffmpeg_color = "yellow" if raw_color == "gold" else raw_color
-            if cover_auto_fit and segments:
-                # Generate a drawbox filter for each segment
+            if cover_auto_fit and segments and len(segments) <= 60:
+                # Generate a drawbox filter for each segment (only if segments are small to prevent visual/memory chokes)
                 for i, seg in enumerate(segments):
                     start = float(seg.get("start", 0.0))
                     end = float(seg.get("end", 0.0))
@@ -347,9 +447,13 @@ def process_video_effects(
                     current_v_link = next_v_link
                 print(f"[FFmpeg] Dynamic Auto-Fit Cover Sub applied to {len(segments)} segments with color '{ffmpeg_color}'.")
             else:
-                # Fallback to single fixed drawbox
-                drawbox_filter_core = f"drawbox=x=iw*{cover_x_pct}:y=ih*{cover_y_pct}:w=iw*{cover_w_pct}:h={cover_h_px}:color={ffmpeg_color}:t=fill"
-                if segments:
+                # Fallback to single fixed drawbox if many segments to protect memory and avoid flickering
+                estimated_h = cover_h_px + extra_h
+                drawbox_y_expr = f"ih*{cover_y_pct:.4f}-{extra_h}"
+                drawbox_filter_core = f"drawbox=x=iw*{cover_x_pct}:y=max(0\\,{drawbox_y_expr}):w=iw*{cover_w_pct}:h={estimated_h}:color={ffmpeg_color}:t=fill"
+                
+                # Only use enable conditions if segments are small
+                if segments and len(segments) <= 60:
                     drawbox_conds = []
                     for seg in segments:
                         start = float(seg.get("start", 0.0))
@@ -358,37 +462,101 @@ def process_video_effects(
                             drawbox_conds.append(f"between(t,{start:.3f},{end:.3f})")
                     if drawbox_conds:
                         drawbox_filter_core += f":enable='{'+'.join(drawbox_conds)}'"
+                else:
+                    if segments:
+                        print(f"[FFmpeg] Static Cover Sub active permanently due to high segment count ({len(segments)}) to protect memory.")
                 
                 next_v_link = f"[{v_prefix}_db_sub]"
                 vf_list.append(f"{current_v_link}{drawbox_filter_core}{next_v_link}")
                 current_v_link = next_v_link
-                print(f"[FFmpeg] Static Cover Sub is active during dialogue segments with color '{ffmpeg_color}'.")
+                print(f"[FFmpeg] Static Cover Sub is active with color '{ffmpeg_color}'.")
 
     # 2d. Burn-in subtitles
     escaped_srt = None
+    temp_srt_name = None
+    print(f"[FFmpeg Subtitles] srt_path={srt_path}, exists={os.path.exists(srt_path) if srt_path else 'N/A'}, enable_subtitles={options.get('enable_subtitles', 'NOT SET')}")
     if srt_path and os.path.exists(srt_path):
         import shutil
-        temp_srt_name = f"sub_{os.path.basename(input_video_path)}.srt"
-        shutil.copy2(srt_path, os.path.join(TEMP_DIR, temp_srt_name))
-        escaped_srt = f"./{temp_srt_name}"
-        sub_color = "&H00FFFF"  # Default yellow
-        outline_color = "&H000000"
-        outline_val = 1.0
-        back_color = "&H80000000"
-        shadow_val = 1.0
-        font_size = 10
+        import uuid
+        temp_srt_name = f"sub_{uuid.uuid4().hex[:16]}.srt"
+        abs_srt_path = os.path.abspath(os.path.join(TEMP_DIR, temp_srt_name))
+        shutil.copy2(srt_path, abs_srt_path)
+        print(f"[FFmpeg Subtitles] Copied SRT to: {abs_srt_path} (size={os.path.getsize(abs_srt_path)} bytes)")
         
-        ref_height = 720.0
-        sub_y = cover_y_pct * ref_height
-        sub_bottom = sub_y + cover_h_px
-        rem_h = max(0.0, ref_height - sub_bottom)
+        # Since we execute FFmpeg with cwd=TEMP_DIR context, using the plain relative filename
+        # of the copied SRT file avoids all complex Windows drive (e.g. C\:) and spacing escape issues in filtergraph.
+        escaped_srt = temp_srt_name
+            
+        sub_color = hex_to_ass_color(options.get("subtitle_color", "#FFFF00"), alpha_prefix="00")
+        outline_color = hex_to_ass_color(options.get("subtitle_outline_color", "#000000"), alpha_prefix="00")
+        # Scale outline and shadow values to PlayResY=288 reference height (factor: 288/720 = 0.4)
+        outline_val = float(options.get("subtitle_outline_width", 2.0)) * 0.4
+        back_color = hex_to_ass_color(options.get("subtitle_shadow_color", "#000000"), alpha_prefix="00")
+        shadow_val = float(options.get("subtitle_shadow_depth", 1.0)) * 0.4
         
-        margin_v_ref = max(6.0, rem_h * 0.25)
-        subtitle_margin_v = max(2, int(margin_v_ref * 0.4))
+        # Scale font size to PlayResY=288 reference height to prevent libass overflow
+        font_size = int(options.get("subtitle_font_size", 20))
+        scaled_font_size = int(max(6, font_size * 0.4))
+
+        if "subtitle_margin_v" in options and options["subtitle_margin_v"] is not None:
+            margin_v_baseline = int(options["subtitle_margin_v"])
+        else:
+            ref_height = 720.0
+            sub_y = cover_y_pct * ref_height
+            sub_bottom = sub_y + cover_h_px
+            rem_h = max(0.0, ref_height - sub_bottom)
+            margin_v_ref = max(6.0, rem_h * 0.25)
+            margin_v_baseline = max(2, int(margin_v_ref * 0.4))
+            
+        # Scale MarginV for Alignment=2 to PlayResY=288 reference height
+        subtitle_margin_v = int(max(2, margin_v_baseline * 0.4))
                 
+        font_name = options.get("subtitle_font_name", "Arial")
         next_v_link = f"[{v_prefix}_subtitles]"
-        vf_list.append(f"{current_v_link}subtitles={escaped_srt}:force_style='FontSize={font_size},Alignment=2,PrimaryColour={sub_color},OutlineColour={outline_color},Outline={outline_val},BackColour={back_color},Shadow={shadow_val},MarginV={subtitle_margin_v}'{next_v_link}")
+        subtitle_filter = f"{current_v_link}subtitles={escaped_srt}:force_style='Fontname={font_name},Bold=1,FontSize={scaled_font_size},Alignment=2,PrimaryColour={sub_color},OutlineColour={outline_color},Outline={outline_val},BackColour={back_color},Shadow={shadow_val},MarginV={subtitle_margin_v}'{next_v_link}"
+        print(f"[FFmpeg Subtitles] Filter: {subtitle_filter}")
+        vf_list.append(subtitle_filter)
         current_v_link = next_v_link
+    else:
+        print(f"[FFmpeg Subtitles] WARNING: Subtitle burn-in SKIPPED. srt_path={srt_path}")
+
+
+    # 2d2. Overlay glowing top title (Reels style)
+    enable_title = options.get("enable_title", False)
+    title_text = options.get("title_text", "").strip()
+    if enable_title and title_text:
+        t_color = options.get("title_color", "#00FF00")
+        t_font_size = int(options.get("title_font_size", 24))
+        t_y_pct = float(options.get("title_y_pct", 0.08))
+        
+        # Scale the font size relative to output canvas layout height (reference baseline = 720)
+        layout_height = 1280 if aspect_ratio_mode in ["crop_9_16", "blur_9_16", "black_9_16"] else get_video_height(input_video_path)
+        scaled_font_size = max(8, int(t_font_size * (layout_height / 720.0)))
+        line_height = int(scaled_font_size * 1.35)
+        
+        # Using Arial Black for bold Reels/TikTok style. Support Vietnamese Unicode diacritics via direct FontFile.
+        font_file_path = "arial.ttf"
+        if sys.platform == "win32":
+            possible_paths = [
+                "C:/Windows/Fonts/arialbd.ttf",
+                "C:/Windows/Fonts/arial.ttf",
+                "C:/Windows/Fonts/timesbd.ttf"
+            ]
+            for p in possible_paths:
+                if os.path.exists(p):
+                    font_file_path = p.replace(":", "\\:")
+                    break
+                    
+        # Split by newlines so each line is centered independently in FFmpeg
+        import re
+        title_lines = [line.strip() for line in re.split(r'\\n|\\N|\n', title_text) if line.strip()]
+        
+        for idx, line_text in enumerate(title_lines):
+            t_text = escape_ffmpeg_drawtext(line_text)
+            drawtext_filter = f"drawtext=fontfile='{font_file_path}':text='{t_text}':x=(w-text_w)/2:y=h*{t_y_pct}+{idx * line_height}:fontsize={scaled_font_size}:fontcolor=white:bordercolor={t_color}:borderw=4"
+            next_v_link = f"[{v_prefix}_title_{idx}]"
+            vf_list.append(f"{current_v_link}{drawtext_filter}{next_v_link}")
+            current_v_link = next_v_link
         
     # 2e. Apply speed
     if speed != 1.0:
@@ -402,12 +570,14 @@ def process_video_effects(
     # Input 0: Original Video
     args += ["-i", input_video_path]
     
-    # Input 1: Optional Dubbed Audio
-    if tts_audio_path and os.path.exists(tts_audio_path):
+    # Optional Inputs in dynamic order:
+    if tts_input_idx is not None:
         args += ["-i", tts_audio_path]
-        
-    # Input 2/3: Optional Watermark Custom Cover
-    if is_custom_cover_available:
+    if bgm_input_idx is not None:
+        args += ["-i", separated_bgm_path]
+    if vocal_input_idx is not None:
+        args += ["-i", separated_vocal_path]
+    if cover_input_idx is not None:
         if watermark_cover_type == "video":
             args += ["-stream_loop", "-1", "-i", watermark_cover_path]
         else: # "image"
@@ -420,9 +590,66 @@ def process_video_effects(
     # Audio complex filter if mixing
     atempo_str = f",atempo={speed}" if speed != 1.0 else ""
     
-    if tts_audio_path and os.path.exists(tts_audio_path):
-        # [0:a] is video's audio, [1:a] is tts audio input
-        audio_filter = f"[0:a]volume='{orig_audio_filter_expr}':eval=frame[a0];[1:a]volume={tts_vol}[a1];[a0][a1]amix=inputs=2:duration=first:dropout_transition=2{atempo_str}[a]"
+    if bgm_input_idx is not None and vocal_input_idx is not None:
+        # AI Separated Audio mixing logic
+        if tts_input_idx is not None:
+            # We mix BGM (steady), Vocal (ducked), and TTS
+            if enable_ducking and original_vol > 0 and ducking_volume < original_vol:
+                import math
+                ratio_ratio = ducking_volume / original_vol
+                db_reduction = -20.0 * math.log10(max(0.01, ratio_ratio))
+                sc_ratio = 1.0 / max(0.05, 1.0 - (db_reduction / 23.0))
+                sc_ratio = min(20.0, max(1.5, sc_ratio))
+                
+                audio_filter = (
+                    f"[{bgm_input_idx}:a]volume={original_vol}[a_bgm];"
+                    f"[{vocal_input_idx}:a]volume={original_vol}[a_voc_raw];"
+                    f"[{tts_input_idx}:a]volume={tts_vol},asplit=2[a1_sc][a1_mix];"
+                    f"[a_voc_raw][a1_sc]sidechaincompress=threshold=0.015:ratio={sc_ratio:.2f}:attack=100:release=400[a_voc_ducked];"
+                    f"[a_bgm][a_voc_ducked][a1_mix]amix=inputs=3:duration=first:dropout_transition=2{atempo_str}[a]"
+                )
+                print(f"[FFmpeg] AI Vocal-Split Ducking active. BGM steady volume={original_vol:.2f}, Vocal ducked ratio={sc_ratio:.2f}")
+            else:
+                # Ducking is disabled: Vocal is NOT mixed (0% volume), BGM is steady, TTS is mixed
+                audio_filter = (
+                    f"[{bgm_input_idx}:a]volume={original_vol}[a_bgm];"
+                    f"[{tts_input_idx}:a]volume={tts_vol}[a_tts];"
+                    f"[a_bgm][a_tts]amix=inputs=2:duration=first:dropout_transition=2{atempo_str}[a]"
+                )
+                print(f"[FFmpeg] AI Vocal-Split: Vocal muted. BGM steady volume={original_vol:.2f}.")
+        else:
+            # No TTS is present, just mix BGM. Vocals are omitted if ducking is disabled.
+            if enable_ducking:
+                audio_filter = (
+                    f"[{bgm_input_idx}:a]volume={original_vol}[a_bgm];"
+                    f"[{vocal_input_idx}:a]volume={original_vol}[a_voc];"
+                    f"[a_bgm][a_voc]amix=inputs=2:duration=first:dropout_transition=2{atempo_str}[a]"
+                )
+            else:
+                audio_filter = f"[{bgm_input_idx}:a]volume={original_vol}{atempo_str}[a]"
+                
+        filter_complex_elements.append(audio_filter)
+        audio_map_src = "[a]"
+        
+    elif tts_input_idx is not None:
+        # Fallback to standard mixed original audio [0:a] & [tts:a]
+        if enable_ducking and original_vol > 0 and ducking_volume < original_vol:
+            import math
+            ratio_ratio = ducking_volume / original_vol
+            db_reduction = -20.0 * math.log10(max(0.01, ratio_ratio))
+            sc_ratio = 1.0 / max(0.05, 1.0 - (db_reduction / 23.0))
+            sc_ratio = min(20.0, max(1.5, sc_ratio))
+            
+            audio_filter = (
+                f"[0:a]volume={original_vol}[a0];"
+                f"[{tts_input_idx}:a]volume={tts_vol},asplit=2[a1_sc][a1_mix];"
+                f"[a0][a1_sc]sidechaincompress=threshold=0.015:ratio={sc_ratio:.2f}:attack=100:release=400[a0_ducked];"
+                f"[a0_ducked][a1_mix]amix=inputs=2:duration=first:dropout_transition=2{atempo_str}[a]"
+            )
+            print(f"[FFmpeg] Fallback/Standard Auto-Ducking active via sidechaincompress ratio={sc_ratio:.2f}")
+        else:
+            audio_filter = f"[0:a]volume={original_vol}[a0];[{tts_input_idx}:a]volume={tts_vol}[a1];[a0][a1]amix=inputs=2:duration=first:dropout_transition=2{atempo_str}[a]"
+            
         filter_complex_elements.append(audio_filter)
         audio_map_src = "[a]"
     else:
@@ -433,6 +660,10 @@ def process_video_effects(
             audio_filter = f"[0:a]volume={original_vol}{atempo_str}[a]"
             filter_complex_elements.append(audio_filter)
             audio_map_src = "[a]"
+
+    if audio_map_src == "[a]":
+        filter_complex_elements.append("[a]loudnorm=I=-16:TP=-1.5:LRA=11[a_norm]")
+        audio_map_src = "[a_norm]"
             
     if filter_complex_elements:
         args += ["-filter_complex", "; ".join(filter_complex_elements)]
@@ -465,13 +696,15 @@ def process_video_effects(
             "-c:v", "h264_nvenc",
             "-preset", "fast",
             "-rc", "constqp",
-            "-qp", "20"
+            "-qp", "20",
+            "-pix_fmt", "yuv420p"
         ]
     else:
         args += [
             "-c:v", "libx264",
             "-preset", "fast",
-            "-crf", "18"
+            "-crf", "18",
+            "-pix_fmt", "yuv420p"
         ]
 
     args += [
