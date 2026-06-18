@@ -68,6 +68,19 @@ def get_tts_model():
         print(f"[TTS Service] Error loading OmniVoice model: {e}")
         return None
 
+def unload_tts_model():
+    """Explicitly unloads the OmniVoice model from VRAM/memory to release GPU power."""
+    global _model
+    if _model is not None:
+        print("[TTS Service] Unloading OmniVoice model...")
+        _model = None
+        import gc
+        import torch
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        print("[TTS Service] OmniVoice model unloaded successfully. VRAM cleared.")
+
 def scan_available_voices() -> list:
     """Scans and lists speakers/cloning voices available in the desktop Voice_ref folder."""
     voices = []
