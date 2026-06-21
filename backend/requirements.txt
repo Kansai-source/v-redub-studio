@@ -8,6 +8,7 @@ aiofiles>=23.0.0
 numpy
 soundfile
 torch
+torchaudio
 omnivoice
 google-genai
 opencv-python
