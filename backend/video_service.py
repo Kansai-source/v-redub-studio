@@ -5,36 +5,56 @@ import sys
 from backend.config import TEMP_DIR, OUTPUTS_DIR
 
 def run_ffmpeg_cmd(cmd_args: list, cwd: str = None) -> bool:
-    """Invokes ffmpeg with given arguments and handles process execution."""
-    import tempfile
+    """Invokes ffmpeg with given arguments, handles process execution, and streams progress logs in real-time."""
     # Ensure ffmpeg uses the correct path on Windows if specified in PATH
     print(f"[FFmpeg] Running command: ffmpeg " + " ".join(shlex.quote(x) for x in cmd_args))
     try:
         # On Windows, keep console startup quiet
         startupinfo = None
         if sys.platform == "win32":
+            import subprocess
             startupinfo = subprocess.STARTUPINFO()
             startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
             startupinfo.wShowWindow = 0 # SW_HIDE
 
-        # Redirect standard streams to prevent subprocess buffer deadlocks,
-        # since ffmpeg output can exceed 64KB on long video transcodes.
-        with tempfile.TemporaryFile(mode='w+', encoding='utf-8') as log_file:
-            process = subprocess.run(
-                ["ffmpeg", "-y"] + cmd_args,
-                cwd=cwd,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=log_file,
-                startupinfo=startupinfo
-            )
-            
-            if process.returncode != 0:
-                log_file.seek(0)
-                err_logs = log_file.read()
-                print(f"[FFmpeg Error] stderr logs:\n{err_logs}")
-                return False
-            return True
+        # Spawn FFmpeg and read stderr line-by-line in real-time to avoid pipe deadlocks and provide progress visibility
+        process = subprocess.Popen(
+            ["ffmpeg", "-y"] + cmd_args,
+            cwd=cwd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding='utf-8',
+            errors='ignore',
+            startupinfo=startupinfo
+        )
+        
+        logs = []
+        while True:
+            line = process.stderr.readline()
+            if not line:
+                break
+            logs.append(line)
+            clean_line = line.strip()
+            if not clean_line:
+                continue
+            # Display real-time progress to CLI
+            if "time=" in clean_line or "size=" in clean_line or "frame=" in clean_line:
+                print(f"[FFmpeg Progress] {clean_line}", end="\r", flush=True)
+            elif any(x in clean_line for x in ["[out#", "Error", "Invalid", "Failed", "Could not"]):
+                # Output critical alerts immediately
+                print(f"\n[FFmpeg Error/Warning] {clean_line}")
+                
+        process.wait()
+        # Clean terminal carriage return
+        print()
+        
+        if process.returncode != 0:
+            err_logs = "".join(logs)
+            print(f"[FFmpeg Error] stderr logs:\n{err_logs}")
+            return False
+        return True
     except Exception as e:
         print(f"[FFmpeg Exception] {e}")
         return False
