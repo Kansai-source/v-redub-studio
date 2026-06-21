@@ -15,6 +15,15 @@ executor = ThreadPoolExecutor(max_workers=2)
 
 # Add parent directory of backend folder to sys.path to enable backend module imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# Prevent Windows system dialog box popups (such as dynamic DLL entry point errors) from blocking background processes
+if sys.platform == "win32":
+    try:
+        import ctypes
+        ctypes.windll.kernel32.SetErrorMode(0x0001 | 0x0002 | 0x8000)
+        print("[System] Windows system error popup dialogs disabled.")
+    except Exception as err_mode_err:
+        print(f"[System Warning] Failed to configure Windows SetErrorMode: {err_mode_err}")
 from fastapi import FastAPI, HTTPException, Body, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse

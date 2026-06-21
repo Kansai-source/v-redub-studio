@@ -23,6 +23,7 @@ def run_ffmpeg_cmd(cmd_args: list, cwd: str = None) -> bool:
             process = subprocess.run(
                 ["ffmpeg", "-y"] + cmd_args,
                 cwd=cwd,
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=log_file,
                 startupinfo=startupinfo
