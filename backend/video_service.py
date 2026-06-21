@@ -78,6 +78,32 @@ def get_video_height(video_path: str) -> int:
         print(f"[ffprobe height probe exception] {e}")
     return 720  # default fallback
 
+def has_audio_stream(video_path: str) -> bool:
+    """Probes the video file using ffprobe to check if it contains any audio stream."""
+    try:
+        cmd = [
+            "ffprobe", "-v", "error",
+            "-select_streams", "a",
+            "-show_entries", "stream=index",
+            "-of", "csv=s=x:p=0",
+            video_path
+        ]
+        startupinfo = None
+        import sys
+        if sys.platform == "win32":
+            import subprocess
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = 0 # SW_HIDE
+
+        process = subprocess.run(cmd, capture_output=True, text=True, startupinfo=startupinfo)
+        if process.returncode == 0:
+            out = process.stdout.strip()
+            return len(out) > 0
+    except Exception as e:
+        print(f"[ffprobe audio probe exception] {e}")
+    return False
+
 def hex_to_ass_color(hex_str: str, default: str = "&H00FFFF", alpha_prefix: str = "00") -> str:
     """Converts HTML hex color codes (#RRGGBB) to ASS color format (&H[AA][BB][GG][RR])."""
     if not hex_str:
@@ -115,6 +141,9 @@ def process_video_effects(
     and audio mixing in a single FFmpeg pass.
     """
     # 1. Base parameters
+    has_audio = has_audio_stream(input_video_path)
+    print(f"[FFmpeg] Input video has audio stream: {has_audio}")
+    
     zoom = float(options.get("zoom_level", 0))          # e.g., 10 means 10% zoom-in
     brightness = float(options.get("brightness", 0))    # -1.0 to 1.0 (0 default)
     contrast = float(options.get("contrast", 1.0))      # 0.0 to 10.0 (1.0 default)
@@ -632,30 +661,36 @@ def process_video_effects(
         audio_map_src = "[a]"
         
     elif tts_input_idx is not None:
-        # Fallback to standard mixed original audio [0:a] & [tts:a]
-        if enable_ducking and original_vol > 0 and ducking_volume < original_vol:
-            import math
-            ratio_ratio = ducking_volume / original_vol
-            db_reduction = -20.0 * math.log10(max(0.01, ratio_ratio))
-            sc_ratio = 1.0 / max(0.05, 1.0 - (db_reduction / 23.0))
-            sc_ratio = min(20.0, max(1.5, sc_ratio))
-            
-            audio_filter = (
-                f"[0:a]volume={original_vol}[a0];"
-                f"[{tts_input_idx}:a]volume={tts_vol},asplit=2[a1_sc][a1_mix];"
-                f"[a0][a1_sc]sidechaincompress=threshold=0.015:ratio={sc_ratio:.2f}:attack=100:release=400[a0_ducked];"
-                f"[a0_ducked][a1_mix]amix=inputs=2:duration=first:dropout_transition=2{atempo_str}[a]"
-            )
-            print(f"[FFmpeg] Fallback/Standard Auto-Ducking active via sidechaincompress ratio={sc_ratio:.2f}")
+        if has_audio:
+            # Fallback to standard mixed original audio [0:a] & [tts:a]
+            if enable_ducking and original_vol > 0 and ducking_volume < original_vol:
+                import math
+                ratio_ratio = ducking_volume / original_vol
+                db_reduction = -20.0 * math.log10(max(0.01, ratio_ratio))
+                sc_ratio = 1.0 / max(0.05, 1.0 - (db_reduction / 23.0))
+                sc_ratio = min(20.0, max(1.5, sc_ratio))
+                
+                audio_filter = (
+                    f"[0:a]volume={original_vol}[a0];"
+                    f"[{tts_input_idx}:a]volume={tts_vol},asplit=2[a1_sc][a1_mix];"
+                    f"[a0][a1_sc]sidechaincompress=threshold=0.015:ratio={sc_ratio:.2f}:attack=100:release=400[a0_ducked];"
+                    f"[a0_ducked][a1_mix]amix=inputs=2:duration=first:dropout_transition=2{atempo_str}[a]"
+                )
+                print(f"[FFmpeg] Fallback/Standard Auto-Ducking active via sidechaincompress ratio={sc_ratio:.2f}")
+            else:
+                audio_filter = f"[0:a]volume={original_vol}[a0];[{tts_input_idx}:a]volume={tts_vol}[a1];[a0][a1]amix=inputs=2:duration=first:dropout_transition=2{atempo_str}[a]"
         else:
-            audio_filter = f"[0:a]volume={original_vol}[a0];[{tts_input_idx}:a]volume={tts_vol}[a1];[a0][a1]amix=inputs=2:duration=first:dropout_transition=2{atempo_str}[a]"
+            # Silent original video, TTS audio only, map directly!
+            audio_filter = f"[{tts_input_idx}:a]volume={tts_vol}{atempo_str}[a]"
+            print("[FFmpeg] Input video has no audio. Mapping TTS audio directly.")
             
         filter_complex_elements.append(audio_filter)
         audio_map_src = "[a]"
     else:
         # If no TTS, just copy or map original audio directly
-        if original_vol <= 0:
+        if original_vol <= 0 or not has_audio:
             audio_map_src = None
+            print("[FFmpeg] Input video has no audio or volume is set to 0. Output audio map disabled.")
         else:
             audio_filter = f"[0:a]volume={original_vol}{atempo_str}[a]"
             filter_complex_elements.append(audio_filter)
@@ -669,7 +704,10 @@ def process_video_effects(
         args += ["-filter_complex", "; ".join(filter_complex_elements)]
         
     # Map video
-    args += ["-map", current_v_link]
+    if not vf_list:
+        args += ["-map", "0:v"]
+    else:
+        args += ["-map", current_v_link]
     
     # Map audio
     if audio_map_src:
