@@ -18,21 +18,27 @@ def strip_trailing_punctuation(text: str) -> str:
 
 _whisper_model = None
 _whisper_model_name = None
+_whisper_compute_type = None
 
-def get_whisper_model(model_name: str = "base"):
-    """Lazily loads or reloads the local WhisperModel with specified model size."""
-    global _whisper_model, _whisper_model_name
-    if _whisper_model is not None and _whisper_model_name == model_name:
+def get_whisper_model(model_name: str = "base", compute_type: Optional[str] = None):
+    """Lazily loads or reloads the local WhisperModel with specified model size and compute type."""
+    global _whisper_model, _whisper_model_name, _whisper_compute_type
+    
+    # Resolve compute_type if not specified
+    if not compute_type:
+        compute_type = "float16" if torch.cuda.is_available() else "int8"
+        
+    if _whisper_model is not None and _whisper_model_name == model_name and _whisper_compute_type == compute_type:
         return _whisper_model
         
-    print(f"[AI Service] Loading local Whisper model '{model_name}'...")
+    print(f"[AI Service] Loading local Whisper model '{model_name}' with compute_type '{compute_type}'...")
     try:
         from faster_whisper import WhisperModel
         device = "cuda" if torch.cuda.is_available() else "cpu"
-        compute_type = "float16" if torch.cuda.is_available() else "int8"
         _whisper_model = WhisperModel(model_name, device=device, compute_type=compute_type)
         _whisper_model_name = model_name
-        print(f"[AI Service] Local Whisper '{model_name}' model initialized on device: {device}")
+        _whisper_compute_type = compute_type
+        print(f"[AI Service] Local Whisper '{model_name}' model initialized on device: {device} (compute_type: {compute_type})")
         return _whisper_model
     except Exception as e:
         print(f"[AI Service] Error loading local Whisper model: {e}")
@@ -40,11 +46,12 @@ def get_whisper_model(model_name: str = "base"):
 
 def unload_whisper_model():
     """Explicitly unloads the local Whisper model from memory/VRAM."""
-    global _whisper_model, _whisper_model_name
+    global _whisper_model, _whisper_model_name, _whisper_compute_type
     if _whisper_model is not None:
         print("[AI Service] Unloading local Whisper model...")
         _whisper_model = None
         _whisper_model_name = None
+        _whisper_compute_type = None
         import gc
         import torch
         gc.collect()
@@ -252,7 +259,8 @@ def split_segment_recursive(text: str, orig_text: str, start: float, end: float,
             return child_segments
 
     # 3. Mismatch / Mute Fallback: Split in half by word/character count
-    if len(text_words) >= 2:
+    # Only split if word count is extremely high (e.g. > 16 words) to avoid mechanical compound word bisection
+    if len(text_words) >= 2 and len(text_words) > 16:
         mid_word = len(text_words) // 2
         
         # Split original text: by words if spaced, otherwise by character index (for Chinese/Japanese/etc.)
@@ -330,16 +338,27 @@ def translate_segments_batch(segments: list, gemini_key: str, gemini_model: str,
         
     # Prepare translation input with duration context to guide Gemini
     input_list = []
-    for seg in segments:
+    for idx, seg in enumerate(segments):
         duration = round(float(seg.get("end", 0.0)) - float(seg.get("start", 0.0)), 2)
         # Fallback to a default duration if values are invalid
         if duration <= 0:
             duration = 3.0
-        input_list.append({
+            
+        item = {
             "id": seg["id"],
             "original_text": seg["original_text"],
             "duration_seconds": duration
-        })
+        }
+        
+        # Context fields (context_before/after) are intentionally omitted to prevent word leakage and grammatical inversion across lines
+            
+        # Add gender and speaker_id context if available (skip in narration mode)
+        if "speaker_id" in seg and seg["speaker_id"] != "narration":
+            item["speaker_id"] = seg["speaker_id"]
+        if "gender" in seg and seg["gender"] != "narration":
+            item["gender"] = seg["gender"]
+            
+        input_list.append(item)
     
     prompt = f"""
 Bạn là biên dịch viên lồng tiếng chuyên nghiệp. Dịch danh sách các câu thoại sau sang {target_lang_name}.
@@ -355,10 +374,12 @@ QUY TẮC BẮT BUỘC:
 5. SỬA LỖI ĐỒNG ÂM CỦA WHISPER: Có một số từ do nhận diện giọng nói nói nhanh bị ghi sai chữ gốc:
    - Nếu trong văn cảnh kinh doanh, lên lịch họp, kế hoạch làm việc mà bản gốc ghi "大好天" (ngày nắng đẹp) thì thực chất người nói muốn nói "大后天" (ngày mốt/ngày kia) -> hãy dịch là "ngày mốt" hoặc "ngày kia".
    - Nếu là vế câu so sánh ví dụ mà bản gốc ghi "想招商会" thì thực chất là "像招商会" -> hãy dịch là "giống như hội nghị chiêu thương/xúc tiến đầu tư".
-6. Tham khảo "duration_seconds" để cân nhắc độ dài câu dịch — câu có duration ngắn thì dịch ngắn gọn để nói kịp, nhưng không được lược bỏ thông tin cốt lõi.
+6. QUY TẮC BẮT BUỘC ĐỘ DÀI THEO DURATION_SECONDS:
+   - Nếu "duration_seconds" < 1.0 giây: Câu dịch bắt buộc phải cực kỳ ngắn, CHỈ ĐƯỢC PHÉP dài từ 1 đến 4 từ, ví dụ: "Đầu hàng thôi", "Vâng ạ", "Hết cách rồi", "Chịu thôi". KHÔNG dịch dài hơn.
+   - Nếu "duration_seconds" từ 1.0 đến 2.0 giây: Câu dịch chỉ được phép dài tối đa 7 từ.
+   - Nếu "duration_seconds" > 2.0 giây: Có thể dịch đầy đủ nhưng hãy chọn từ ngữ cô đọng nhất.
 7. KHÔNG dịch thành ngữ Trung Quốc theo kiểu phiên âm Hán Việt thô cứng (ví dụ KHÔNG dịch "不言而喻" thành "Bất Ngôn Nhi Dụ", mà dịch thành "Hiển nhiên" hoặc "Không nói cũng rõ").
 8. KHÔNG RÒ RỈ CHỮ NƯỚC NGOÀI: Bản dịch phải bằng {target_lang_name} 100%. Tuyệt đối không để lẫn chữ Trung Quốc, Nhật Bản, Thái Lan hoặc bất kỳ ký tự unicode lạ nào khác trong câu dịch.
-9. ĐỘ DÀI tối thiểu cho các câu thoại cực ngắn: Nếu câu dịch quá ngắn (1-2 từ như "Được", "Vâng", "Ừ"), hãy tự diễn giải tự nhiên thành cụm từ dài hơn (3-5 từ, ví dụ "Được rồi ạ", "Vâng tôi biết rồi", "Tôi đồng ý", "Đúng vậy ạ") nhằm giúp công cụ tổng hợp giọng nói hoạt động ổn định và giữ được tông giọng chuẩn.
 
 Input:
 {json.dumps(input_list, ensure_ascii=False)}
@@ -445,6 +466,114 @@ def translate_text(text: str, target_lang: str = "vi") -> str:
     except Exception as e:
         print(f"[AI Translation Error] {e} - Returning original text.")
         return text
+
+def remove_consecutive_repetitions(
+    segments: list,
+    audio_path: str = None,
+    model = None,
+    source_lang: str = None
+) -> list:
+    """Removes or re-transcribes consecutive Whisper repetition hallucination segments."""
+    if not segments:
+        return []
+        
+    import subprocess
+    import os
+    import tempfile
+    from backend.config import TEMP_DIR
+    
+    # 1. Group segments by consecutive duplicated original_text
+    groups = []
+    current_group = [segments[0]]
+    
+    for seg in segments[1:]:
+        prev_text = current_group[-1]["original_text"].strip(" .,?!。，？！")
+        curr_text = seg["original_text"].strip(" .,?!。，？！")
+        if prev_text == curr_text and prev_text != "":
+            current_group.append(seg)
+        else:
+            groups.append(current_group)
+            current_group = [seg]
+    groups.append(current_group)
+    
+    # 2. Process each group
+    result_segments = []
+    for g in groups:
+        if len(g) >= 3:
+            first_seg = g[0]
+            result_segments.append(first_seg)
+            
+            slice_start = float(g[1]["start"])
+            slice_end = float(g[-1]["end"])
+            
+            fallback_success = False
+            if audio_path and model and os.path.exists(audio_path):
+                try:
+                    os.makedirs(TEMP_DIR, exist_ok=True)
+                    temp_fd, temp_wav = tempfile.mkstemp(suffix=".wav", dir=TEMP_DIR)
+                    os.close(temp_fd)
+                    
+                    duration = slice_end - slice_start
+                    cmd = [
+                        "ffmpeg", "-y",
+                        "-ss", str(slice_start),
+                        "-t", str(duration),
+                        "-i", audio_path,
+                        "-ar", "16000",
+                        "-ac", "1",
+                        "-c:a", "pcm_s16le",
+                        temp_wav
+                    ]
+                    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    
+                    if os.path.exists(temp_wav):
+                        transcribe_kwargs = {"condition_on_previous_text": False, "vad_filter": False}
+                        if source_lang and source_lang != "auto":
+                            transcribe_kwargs["language"] = source_lang
+                            
+                        segments_generator, _ = model.transcribe(temp_wav, **transcribe_kwargs)
+                        fallback_segs = list(segments_generator)
+                        
+                        for f_seg in fallback_segs:
+                            f_text = f_seg.text.strip()
+                            if not f_text:
+                                continue
+                            if f_text.strip(" .,?!。，？！") == first_seg["original_text"].strip(" .,?!。，？！"):
+                                continue
+                                
+                            new_seg = {
+                                "id": 0,
+                                "start": round(slice_start + float(f_seg.start), 2),
+                                "end": round(slice_start + float(f_seg.end), 2),
+                                "original_text": f_seg.text,
+                                "text": "",
+                                "gender": first_seg.get("gender", "female"),
+                                "speaker_id": first_seg.get("speaker_id", "female_1"),
+                                "emotion": first_seg.get("emotion", "neutral")
+                            }
+                            result_segments.append(new_seg)
+                            fallback_success = True
+                            
+                except Exception as e:
+                    print(f"[AI Service] Fallback transcription failed: {e}")
+                finally:
+                    if 'temp_wav' in locals() and os.path.exists(temp_wav):
+                        try:
+                            os.remove(temp_wav)
+                        except Exception:
+                            pass
+                            
+            if fallback_success:
+                print(f"[AI Service] Detected repetition loop ({len(g)} times) for text: '{first_seg['original_text']}' from {slice_start}s to {slice_end}s. Fallback transcription succeeded! Recovered new clean segments.")
+            else:
+                print(f"[AI Service] Detected repetition loop ({len(g)} times) for text: '{first_seg['original_text']}' from {slice_start}s to {slice_end}s. Loop removed successfully.")
+        else:
+            result_segments.extend(g)
+            
+    for new_idx, seg in enumerate(result_segments):
+        seg["id"] = new_idx
+        
+    return result_segments
 
 def guess_gender(vietnamese_text: str) -> str:
     """Simple rule-based heuristic to guess male/female pronouns in Vietnamese."""
@@ -988,14 +1117,15 @@ def transcribe_and_translate(
     target_lang: str = "vi",
     whisper_model: str = "base",
     source_lang: str = "auto",
-    narration: bool = False
+    narration: bool = False,
+    whisper_compute_type: Optional[str] = None
 ) -> dict:
     """Coordinates transcription and translation depending on chosen mode: Local, Hybrid or Gemini API."""
     if mode == "gemini":
         return transcribe_with_gemini(audio_path, gemini_key, gemini_model, gemini_chunk_size, gemini_api_endpoint, target_lang, source_lang, narration)
         
     # Local or Hybrid mode (faster-whisper transcription)
-    model = get_whisper_model(whisper_model)
+    model = get_whisper_model(whisper_model, compute_type=whisper_compute_type)
     if not model:
         return {
             "success": False,
@@ -1004,7 +1134,7 @@ def transcribe_and_translate(
         
     try:
         print(f"[AI Service] Transcribing audio with local Whisper model '{whisper_model}' (source_lang: {source_lang}, mode: {mode})...")
-        transcribe_kwargs = {"beam_size": 5}
+        transcribe_kwargs = {"beam_size": 5, "vad_filter": False}
         if source_lang and source_lang != "auto":
             transcribe_kwargs["language"] = source_lang
             
@@ -1029,6 +1159,14 @@ def transcribe_and_translate(
                 "speaker_id": "narration" if narration else "female_1",
                 "emotion": "neutral"
             })
+            
+        # Apply Whispering repetition filtering with fallback
+        translated_segments = remove_consecutive_repetitions(
+            translated_segments,
+            audio_path=audio_path,
+            model=model,
+            source_lang=source_lang
+        )
             
         # Perform translations on raw segments first
         if translated_segments:

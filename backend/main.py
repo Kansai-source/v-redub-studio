@@ -91,6 +91,7 @@ class TranscribeRequest(BaseModel):
     whisper_model: Optional[str] = "base"
     source_lang: Optional[str] = "auto"
     narration: Optional[bool] = False
+    whisper_compute_type: Optional[str] = "int8_float16"
 
 class VideoFilterOptions(BaseModel):
     zoom_level: float = 0.0
@@ -416,7 +417,7 @@ def run_download_worker(task_id: str, url: str):
             jobs[task_id]["message"] = f"Lỗi: {str(e)}"
             jobs[task_id]["error"] = str(e)
 
-def run_transcribe_worker(task_id: str, video_path: str, mode: str, gemini_key: str, gemini_model: str, gemini_chunk_size: float = 900.0, gemini_api_endpoint: Optional[str] = None, target_lang: str = "vi", whisper_model: str = "base", source_lang: str = "auto", narration: bool = False):
+def run_transcribe_worker(task_id: str, video_path: str, mode: str, gemini_key: str, gemini_model: str, gemini_chunk_size: float = 900.0, gemini_api_endpoint: Optional[str] = None, target_lang: str = "vi", whisper_model: str = "base", source_lang: str = "auto", narration: bool = False, whisper_compute_type: str = "int8_float16"):
     try:
         with jobs_lock:
             jobs[task_id] = {"status": "processing", "progress": 10, "message": "Kiểm tra tập tin âm thanh...", "result": None, "error": None}
@@ -446,7 +447,8 @@ def run_transcribe_worker(task_id: str, video_path: str, mode: str, gemini_key: 
             target_lang=target_lang,
             whisper_model=whisper_model,
             source_lang=source_lang,
-            narration=narration
+            narration=narration,
+            whisper_compute_type=whisper_compute_type
         )
         
         if not result.get("success"):
@@ -715,7 +717,7 @@ def api_transcribe(req: TranscribeRequest):
         }
     executor.submit(
         run_transcribe_worker,
-        task_id, req.file_path, req.mode, req.gemini_key, req.gemini_model, req.gemini_chunk_size, req.gemini_api_endpoint, req.target_lang, req.whisper_model, req.source_lang, req.narration
+        task_id, req.file_path, req.mode, req.gemini_key, req.gemini_model, req.gemini_chunk_size, req.gemini_api_endpoint, req.target_lang, req.whisper_model, req.source_lang, req.narration, req.whisper_compute_type
     )
     return {"success": True, "task_id": task_id}
 

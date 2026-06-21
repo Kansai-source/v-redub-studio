@@ -103,6 +103,7 @@ export default function App() {
   const [videoSpeed, setVideoSpeed] = useState<number>(1.0);
   const [targetLang, setTargetLang] = useState<string>("vi");
   const [whisperModel, setWhisperModel] = useState<string>("base");
+  const [whisperComputeType, setWhisperComputeType] = useState<string>("int8_float16");
   const [sourceLang, setSourceLang] = useState<string>("auto");
   const [aspectRatioMode, setAspectRatioMode] = useState<string>("original"); // original, crop_9_16, blur_9_16
   const [subMarginV, setSubMarginV] = useState<number>(20); // vertical margin for burned subtitles
@@ -852,6 +853,7 @@ export default function App() {
           gemini_api_endpoint: (transcribeMode === "gemini" || transcribeMode === "hybrid") && geminiAPIEndpoint ? geminiAPIEndpoint : undefined,
           target_lang: targetLang,
           whisper_model: whisperModel,
+          whisper_compute_type: whisperComputeType,
           source_lang: sourceLang,
           narration: isNarrationMode
         })
@@ -932,6 +934,7 @@ export default function App() {
       videoSpeed,
       targetLang,
       whisperModel,
+      whisperComputeType,
       sourceLang,
       aspectRatioMode,
       subMarginV,
@@ -1004,6 +1007,7 @@ export default function App() {
         if (imported.videoSpeed !== undefined) setVideoSpeed(Number(imported.videoSpeed));
         if (imported.targetLang !== undefined) setTargetLang(String(imported.targetLang));
         if (imported.whisperModel !== undefined) setWhisperModel(String(imported.whisperModel));
+        if (imported.whisperComputeType !== undefined) setWhisperComputeType(String(imported.whisperComputeType));
         if (imported.sourceLang !== undefined) setSourceLang(String(imported.sourceLang));
         if (imported.aspectRatioMode !== undefined) setAspectRatioMode(String(imported.aspectRatioMode));
         if (imported.subMarginV !== undefined) setSubMarginV(Number(imported.subMarginV));
@@ -2598,6 +2602,20 @@ export default function App() {
                         </div>
                       )}
                     </div>
+
+                    {(transcribeMode === "local" || transcribeMode === "hybrid") && (
+                      <div style={{ display: "flex", flexDirection: "column", gap: "4px", marginTop: "8px" }}>
+                        <span style={{ fontSize: "11px", color: "var(--text-muted)", fontWeight: "600" }}>KIỂU TÍNH TOÁN WHISPER (Dành cho GPU):</span>
+                        <select
+                          value={whisperComputeType}
+                          onChange={(e) => setWhisperComputeType(e.target.value)}
+                          style={{ padding: "6px 10px", fontSize: "13px", width: "100%", backgroundColor: "rgba(0,0,0,0.2)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: "4px", color: "#fff" }}
+                        >
+                          <option value="int8_float16">int8_float16 (Khuyên dùng - Tiết kiệm VRAM)</option>
+                          <option value="float16">float16 (Chính xác cao - Ngốn VRAM)</option>
+                        </select>
+                      </div>
+                    )}
 
                     <div style={{ display: "flex", flexDirection: "column", gap: "4px", marginTop: "8px", marginBottom: "8px" }}>
                       <span style={{ fontSize: "11px", color: "var(--text-muted)", fontWeight: "600" }}>NGÔN NGỮ PHỤ ĐỀ DỊCH:</span>

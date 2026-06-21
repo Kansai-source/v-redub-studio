@@ -45,6 +45,73 @@ def trim_audio_silence(samples: np.ndarray, sample_rate: int, threshold_ratio: f
     return samples[start_idx:end_idx]
 
 
+def ensure_clean_reference_audio(ref_path: str) -> str:
+    """
+    Ensures that the reference audio has no internal silent pauses.
+    If not cleaned yet, creates a cleaned WAV next to the original file
+    and returns its path.
+    """
+    if not ref_path or not os.path.exists(ref_path):
+        return ref_path
+        
+    basename, ext = os.path.splitext(ref_path)
+    if basename.endswith("_clean"):
+        return ref_path
+        
+    cleaned_path = basename + "_clean" + ext
+    
+    # Check if we already cleaned it and the cleaned file is newer than original
+    if os.path.exists(cleaned_path):
+        if os.path.getmtime(cleaned_path) >= os.path.getmtime(ref_path):
+            return cleaned_path
+            
+    try:
+        print(f"[TTS Service] Auto-cleaning reference audio: {ref_path} -> {cleaned_path}")
+        samples, sr = sf.read(ref_path)
+        if len(samples.shape) > 1:
+            samples = np.mean(samples, axis=1)
+            
+        peak = np.max(np.abs(samples))
+        if peak == 0:
+            return ref_path
+            
+        threshold = peak * 0.015
+        is_non_silent = np.abs(samples) > threshold
+        
+        keep_mask = np.ones(len(samples), dtype=bool)
+        
+        # Min silence duration to cut: 50ms
+        min_silence_len = int(0.050 * sr)
+        # 16ms pad buffer to prevent click artifacts
+        pad = int(0.016 * sr)
+        
+        i = 0
+        total_samples = len(samples)
+        while i < total_samples:
+            if not is_non_silent[i]:
+                start_sil = i
+                while i < total_samples and not is_non_silent[i]:
+                    i += 1
+                end_sil = i
+                sil_len = end_sil - start_sil
+                
+                if sil_len >= min_silence_len:
+                    keep_start = start_sil + pad
+                    keep_end = end_sil - pad
+                    if keep_start < keep_end:
+                        keep_mask[keep_start:keep_end] = False
+            else:
+                i += 1
+                
+        cleaned_samples = samples[keep_mask]
+        sf.write(cleaned_path, cleaned_samples, sr)
+        print(f"[TTS Service] Auto-silence cleaning complete. Original: {len(samples)/float(sr):.2f}s, Cleaned: {len(cleaned_samples)/float(sr):.2f}s")
+        return cleaned_path
+    except Exception as e:
+        print(f"[TTS Service] Failed to auto-clean reference audio {ref_path}: {e}")
+        return ref_path
+
+
 def get_tts_model():
     """Lazily loads the OmniVoice model and caches it to conserve VRAM."""
     global _model
@@ -345,6 +412,7 @@ def generate_voiceover(
                 v_meta = props["voice_meta"]
                 file_path = v_meta.get("file_path") if v_meta else None
                 if file_path and os.path.exists(file_path):
+                    file_path = ensure_clean_reference_audio(file_path)
                     try:
                         print(f"[TTS Service] Pre-compiling VoiceClonePrompt for: '{voice_id}' using {file_path}")
                         clone_prompt = model.create_voice_clone_prompt(
@@ -364,15 +432,18 @@ def generate_voiceover(
         target_duration=5.0,
         max_duration=8.0
     )
+    print(f"[TTS Service] Grouped {len(segments)} segments into {len(grouped_segments)} groups")
     
     next_available_sample = 0
-    max_shift_samples = int(1.2 * sample_rate)
+    compiled_groups_meta = []
     
     try:
         for group in grouped_segments:
             # SHORT_WORD_EXPANSIONS replacement
             raw_txt = group["text"].strip().lower()
-            expanded_text = SHORT_WORD_EXPANSIONS.get(raw_txt)
+            # Strip leading/trailing punctuation for dictionary lookup
+            lookup_txt = re.sub(r'^[^\w\s]+|[^\w\s]+$', '', raw_txt).strip()
+            expanded_text = SHORT_WORD_EXPANSIONS.get(lookup_txt)
             if expanded_text:
                 print(f"[TTS Service] Expanded short phrase: '{group['text']}' -> '{expanded_text}'")
                 text_to_synthesize = expanded_text
@@ -406,11 +477,16 @@ def generate_voiceover(
             cached_seg_path = os.path.join(segment_cache_dir, f"seg_cache_{seg_hash}.wav")
             
             seg_samples = None
+            group_id = group["sub_ids"][0]
             if os.path.exists(cached_seg_path):
-                print(f"[TTS Service] Cache hit for group segment: {cached_seg_path}")
+                print(f"[TTS Service] Segment {group_id} cache hit. Loading: {cached_seg_path}")
                 seg_samples, sr = sf.read(cached_seg_path)
             else:
-                print(f"[TTS Service] Cache miss, synthesizing: '{text[:30]}...' using seed {seed_val}")
+                speaker_name = group["voice_id"]
+                text_preview = text[:20] + " ..." if len(text) > 20 else text
+                print(f"[TTS Service] Synthesizing segment {group_id} ('{text_preview}') using {speaker_name} (Synthetic)")
+                print(f"[TTS Service] Synthesizing segment {group_id} ('{text_preview}') using {speaker_name} (Synthetic) (Fixed Seed: {seed_val})")
+                
                 torch.manual_seed(seed_val)
                 np.random.seed(seed_val)
                 
@@ -431,7 +507,7 @@ def generate_voiceover(
                     else:
                         audio = model.generate(
                             text=text,
-                            ref_audio=group["voice_meta"]["file_path"],
+                            ref_audio=ensure_clean_reference_audio(group["voice_meta"]["file_path"]),
                             language=target_lang,
                             **kwargs
                         )
@@ -454,6 +530,7 @@ def generate_voiceover(
                 
                 # Cache newly synthesized audio segment
                 sf.write(cached_seg_path, seg_samples, sample_rate)
+                print(f"[TTS Service] Saved synthesized segment {group_id} to cache: {cached_seg_path}")
                 
             # Double-check trim after loading from cache or synthesizing
             seg_samples = trim_audio_silence(seg_samples, sample_rate)
@@ -464,16 +541,35 @@ def generate_voiceover(
             expected_end = group["end"]
             seg_duration = expected_end - expected_start
             
+            # Tính toán độ trễ đang tích lũy
+            target_start_sample = int(expected_start * sample_rate)
+            accumulated_delay = 0.0
+            if next_available_sample > target_start_sample:
+                accumulated_delay = (next_available_sample - target_start_sample) / float(sample_rate)
+            
             if seg_duration > 0:
-                rate = raw_duration / seg_duration
-                # Clip speed stretch rate to prevent distortion
-                if rate > 1.42:
-                    rate = 1.42
-                elif rate < 0.80:
-                    rate = max(0.80, rate)
+                # Đặt mục tiêu co ngắn thời lượng để bù lại độ trễ
+                catchup_target_duration = max(0.4, seg_duration - accumulated_delay * 0.5)
+                needed_rate = raw_duration / catchup_target_duration
+                rate = needed_rate
+                
+                # Giới hạn tốc độ nghiêm ngặt ở 1.42x theo yêu cầu của người dùng để thu âm không bị méo tiếng
+                max_allowed_rate = 1.42
+                
+                is_capped = False
+                if needed_rate > max_allowed_rate:
+                    rate = max_allowed_rate
+                    is_capped = True
+                elif needed_rate < 1.0:
+                    rate = 1.0
                     
                 if abs(rate - 1.0) > 0.02:
-                    print(f"[TTS Service] Auto-Speed Match atempo: {raw_duration:.2f}s -> {seg_duration:.2f}s (rate={rate:.3f})")
+                    if is_capped:
+                        target_dur = raw_duration / rate
+                        print(f"[TTS Service] Auto-Speed Match: CAPPED speedup at {max_allowed_rate}x for segment {group_id} (Needed {needed_rate:.2f}x: {raw_duration:.2f}s -> target {target_dur:.2f}s, slot was {seg_duration:.2f}s, delay was {accumulated_delay:.2f}s)")
+                    else:
+                        target_dur = raw_duration / rate
+                        print(f"[TTS Service] Auto-Speed Match: Sped up segment {group_id} ({raw_duration:.2f}s -> {target_dur:.2f}s, delay was {accumulated_delay:.2f}s)")
                     seg_samples = stretch_audio_ffmpeg(seg_samples, rate, sample_rate)
                     raw_duration = len(seg_samples) / float(sample_rate)
                     
@@ -481,12 +577,33 @@ def generate_voiceover(
             target_start_sample = int(expected_start * sample_rate)
             actual_start_sample = max(target_start_sample, next_available_sample)
             
-            # Bound shift to 1.2s
+            # Bound shift to 1.5s to keep tightly synced with video
+            max_shift_samples = int(1.5 * sample_rate)
             if actual_start_sample - target_start_sample > max_shift_samples:
                 actual_start_sample = target_start_sample + max_shift_samples
                 
+            # Limit the overlap to at most 0.8s to avoid talking over each other
+            max_overlap_samples = int(0.8 * sample_rate)
+            min_allowed_start = next_available_sample - max_overlap_samples
+            if actual_start_sample < min_allowed_start:
+                actual_start_sample = min_allowed_start
+                
+            # Prevent 3-way overlap by ensuring segment i starts after segment i-2 ends
+            if len(compiled_groups_meta) >= 2:
+                prev_prev_end_sample = compiled_groups_meta[-2]["end_sample"]
+                if actual_start_sample < prev_prev_end_sample:
+                    actual_start_sample = prev_prev_end_sample
+                    
             actual_start_time = actual_start_sample / float(sample_rate)
             actual_end_time = (actual_start_sample + len(seg_samples)) / float(sample_rate)
+            
+            # Record timing meta
+            compiled_groups_meta.append({
+                "actual_start": actual_start_time,
+                "actual_end": actual_end_time,
+                "actual_start_sample": actual_start_sample,
+                "end_sample": actual_start_sample + len(seg_samples)
+            })
             
             # Map back to constituent segments
             group_old_duration = expected_end - expected_start
@@ -534,7 +651,7 @@ def designer_generate_temp_voice(instruct: str, output_path: str, text: Optional
     try:
         # Short demo sentence to hear the voice character
         if not text:
-            text = "Xin chào, đây là giọng nói thử nghiệm của tôi."
+            text = "Xin chào, đây là giọng nói thử nghiệm của tôi. Tôi hy vọng giọng đọc này sẽ giúp bạn có những trải nghiệm thiết kế video lồng tiếng tuyệt vời nhất."
         print(f"[TTS Service] Designing zero-shot custom voice with prompt: '{instruct}' on text: '{text}'")
         
         kwargs = {
